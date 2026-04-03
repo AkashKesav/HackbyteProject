@@ -1,0 +1,49 @@
+{
+  "hash": "c4ca8398",
+  "configHash": "3dfc571d",
+  "lockfileHash": "39506204",
+  "browserHash": "ebf772e3",
+  "optimized": {
+    "react/jsx-dev-runtime": {
+      "src": "../../node_modules/react/jsx-dev-runtime.js",
+      "file": "react_jsx-dev-runtime.js",
+      "fileHash": "0eb646d4",
+      "needsInterop": true
+    },
+    "react": {
+      "src": "../../node_modules/react/index.js",
+      "file": "react.js",
+      "fileHash": "12d6f31d",
+      "needsInterop": true
+    },
+    "react-dom/client": {
+      "src": "../../node_modules/react-dom/client.js",
+      "file": "react-dom_client.js",
+      "fileHash": "0557f8f9",
+      "needsInterop": true
+    },
+    "spacetimedb/react": {
+      "src": "../../node_modules/spacetimedb/dist/react/index.mjs",
+      "file": "spacetimedb_react.js",
+      "fileHash": "b65ba200",
+      "needsInterop": false
+    },
+    "spacetimedb": {
+      "src": "../../node_modules/spacetimedb/dist/index.browser.mjs",
+      "file": "spacetimedb.js",
+      "fileHash": "20063212",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "chunk-2VHV66RP": {
+      "file": "chunk-2VHV66RP.js"
+    },
+    "chunk-NUO4AZDT": {
+      "file": "chunk-NUO4AZDT.js"
+    },
+    "chunk-5WRI5ZAA": {
+      "file": "chunk-5WRI5ZAA.js"
+    }
+  }
+}

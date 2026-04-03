@@ -45,6 +45,25 @@ export function getPrimaryWorkspaceFolder(): vscode.WorkspaceFolder | undefined 
   return vscode.workspace.workspaceFolders?.[0];
 }
 
+export async function chooseWorkspaceFolder(): Promise<vscode.WorkspaceFolder | undefined> {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || folders.length === 0) {
+    return undefined;
+  }
+
+  if (folders.length === 1) {
+    return folders[0];
+  }
+
+  const active = getPrimaryWorkspaceFolder();
+  const picked = await vscode.window.showWorkspaceFolderPick({
+    placeHolder: 'Choose the workspace folder whose recent commits should be matched against open tasks.',
+    ignoreFocusOut: true,
+  });
+
+  return picked ?? active;
+}
+
 export async function getGeminiApiKey(
   context: vscode.ExtensionContext
 ): Promise<string | undefined> {

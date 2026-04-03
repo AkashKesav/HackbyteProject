@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import { getExtensionConfig, promptForGeminiApiKey } from './config';
 import { runResolutionFlow } from './flows/runResolutionFlow';
+import { initializeOutputChannel } from './logging';
 
 let outputChannel: vscode.OutputChannel | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   outputChannel = vscode.window.createOutputChannel('Hackbyte Taskboard');
+  initializeOutputChannel(outputChannel);
   outputChannel.appendLine('Hackbyte Taskboard extension activated.');
   context.subscriptions.push(outputChannel);
 

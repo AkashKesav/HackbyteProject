@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
+import './app.css';
 import { Identity } from 'spacetimedb';
 import { SpacetimeDBProvider } from 'spacetimedb/react';
 import { DbConnection, ErrorContext } from '../shared/module_bindings/index.ts';

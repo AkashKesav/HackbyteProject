@@ -6,7 +6,6 @@ import type {
   Task as TaskRow,
   TaskResolutionEvent as TaskResolutionEventRow,
 } from '../shared/module_bindings/types';
-import './app.css';
 
 type TaskStatus = 'todo' | 'in_progress' | 'done';
 type TaskTimestamp = TaskRow['createdAt'] | TaskResolutionEventRow['createdAt'];
