@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env.local
+.spacetime-local*.log
+.vite-dev*.log
+*.tsbuildinfo
+.cursor/
+.windsurfrules
+AGENTS.md
+CLAUDE.md
