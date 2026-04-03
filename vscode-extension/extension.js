@@ -1,3 +1,9 @@
+// This VS Code extension module provides the main entry point for the Commit Confessional detector.
+// It imports necessary Node.js modules for file system operations, path handling, and cryptography.
+// The extension uses VS Code's API to register commands and listen for editor events.
+// All module dependencies are imported at the top to ensure they're available throughout the extension.
+// The extension is designed to be lightweight and performant with minimal overhead on VS Code.
+
 const vscode = require("vscode");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -609,3 +615,9 @@ module.exports = {
 //sdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 //asdffsadfsddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddsdf
 //sdffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+
+//skdjflksajfdlkasjflkasjlkfdjasljflkasjdflkas
+//sdkjflsjflksjflkjslfkjslkjflksjflksjflksjflkjsklfjslkfjlksjflksjflksjfksjflksfk
+//sjdflksajfdlkjsalkfjkal;jjljklkjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jsaldjflkasjdfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//sdjflkasjflkasjflksjfljsalkfjlsjflsjflksjflkjs

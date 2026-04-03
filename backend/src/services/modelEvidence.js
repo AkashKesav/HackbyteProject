@@ -8,6 +8,9 @@ const firefoxLogPath = path.join(os.homedir(), ".cc-firefox-log.jsonl");
 const MAX_LOG_LINES = 500;
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const HASH_TIME_WINDOW_MS = 60 * 1000;
+const PREVIEW_EVENT_WINDOW_MS = 3 * 60 * 1000;
+const MIN_MEANINGFUL_LINE_LENGTH = 15;
+const MIN_DIFF_LINES_FOR_PERCENTAGE = 3;
 
 export async function buildModelEvidenceReceipt(payload = {}) {
   const [vsCodeLog, firefoxLog] = await Promise.all([
@@ -15,10 +18,11 @@ export async function buildModelEvidenceReceipt(payload = {}) {
     loadJsonLines(payload.firefoxLog, firefoxLogPath),
   ]);
 
+  const mode = payload.receiptUrl === "preview://working-tree" ? "preview" : "commit";
   const diffText = buildDiffText(payload);
   const diffAnalysis = analyzeDiff(diffText);
-  const evidence = correlateLogs(vsCodeLog, firefoxLog, diffAnalysis);
-  const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis);
+  const evidence = correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode);
+  const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis, mode);
 
   return {
     receiptUrl: payload.receiptUrl || null,
@@ -31,6 +35,7 @@ export async function buildModelEvidenceReceipt(payload = {}) {
       firefoxEntries: firefoxLog.length,
       diffHashes: diffAnalysis.hashes.size,
       totalChangedLines: diffAnalysis.totalChangedLines,
+      meaningfulChangedLines: diffAnalysis.meaningfulChangedLines.length,
     },
     modelEvidence: evidence,
     copilotContribution,
@@ -87,6 +92,7 @@ function buildDiffText(payload) {
 
 function analyzeDiff(diffText) {
   const changedLines = [];
+  const meaningfulChangedLines = [];
   const hashes = new Set();
 
   for (const rawLine of String(diffText || "").split(/\r?\n/)) {
@@ -100,40 +106,44 @@ function analyzeDiff(diffText) {
     }
 
     changedLines.push(normalized);
-    if (normalized.length >= 20) {
+    if (isMeaningfulLine(normalized)) {
+      meaningfulChangedLines.push(normalized);
       hashes.add(hashContent(normalized));
     }
   }
 
   return {
     changedLines,
+    meaningfulChangedLines,
     hashes,
     totalChangedLines: changedLines.length,
   };
 }
 
-function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
-  const firefoxCopies = firefoxLog.filter((entry) => entry.eventType === "copy" || entry.type === "copy");
+function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode) {
+  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
+  const recentFirefoxLog = filterRecentEntries(firefoxLog, mode);
+  const firefoxCopies = recentFirefoxLog.filter((entry) => entry.eventType === "copy" || entry.type === "copy");
   const firefoxRequests = firefoxLog.filter(
     (entry) => entry.eventType === "network-request" || entry.eventType === "tab-visit"
   );
-  const vscodePastes = vsCodeLog.filter(
+  const vscodePastes = recentVsCodeLog.filter(
     (entry) => entry.eventType === "paste-event" || entry.source === "paste-event" || entry.label === "paste-detected"
   );
-  const vscodeSuggestions = vsCodeLog.filter(
+  const vscodeSuggestions = recentVsCodeLog.filter(
     (entry) => entry.eventType === "inline-suggestion" || entry.source === "inline-suggestion"
   );
-  const modelQueries = vsCodeLog.filter(
+  const modelQueries = recentVsCodeLog.filter(
     (entry) => entry.label === "model-query" || entry.source === "copilot-log"
   );
   const aiSnippets = [...firefoxCopies, ...vscodePastes, ...vscodeSuggestions]
     .map((entry) => entry.contentText)
     .filter((value) => typeof value === "string" && value.trim());
-  const coverage = calculateAiCoverage(diffAnalysis.changedLines, aiSnippets);
+  const coverage = calculateAiCoverage(diffAnalysis.meaningfulChangedLines, aiSnippets);
   const copilotCoverage = calculateAiCoverage(
-    diffAnalysis.changedLines,
+    diffAnalysis.meaningfulChangedLines,
     [...vscodePastes, ...vscodeSuggestions]
-      .filter((entry) => (entry.provider || "").toLowerCase() === "copilot" || (entry.tool || "") !== "Human / Unknown")
+      .filter((entry) => (entry.provider || "").toLowerCase() === "copilot" || isExplicitTool(entry.tool))
       .map((entry) => entry.contentText)
       .filter((value) => typeof value === "string" && value.trim())
   );
@@ -154,8 +164,8 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         method: "hash-correlation",
         provider: copy.provider || "unknown",
         model: latestModel(modelQueries),
-        contribution: buildContributionSummary(coverage, "HIGH"),
-        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
+        contribution: buildContributionSummary(coverage, "HIGH", mode),
+        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM", mode),
         evidence: [
           `Firefox copy at ${copy.ts} from ${copy.provider || "unknown"}`,
           `VS Code paste at ${matchingPaste.ts} into ${matchingPaste.documentPath || "unknown"}`,
@@ -172,8 +182,8 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         method: "diff-hash-match",
         provider: copy.provider || "unknown",
         model: latestModel(modelQueries),
-        contribution: buildContributionSummary(coverage, "HIGH"),
-        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
+        contribution: buildContributionSummary(coverage, "HIGH", mode),
+        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM", mode),
         evidence: [
           `Firefox copy at ${copy.ts} from ${copy.provider || "unknown"}`,
           `Copied content hash appears in commit diff`,
@@ -194,8 +204,8 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         method: "time-correlation",
         provider: copy.provider || "unknown",
         model: latestModel(modelQueries),
-        contribution: buildContributionSummary(coverage, "MEDIUM"),
-        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
+        contribution: buildContributionSummary(coverage, "MEDIUM", mode),
+        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM", mode),
         evidence: [
           `Firefox copy at ${copy.ts}`,
           `VS Code ${nearbySuggestion.source || nearbySuggestion.eventType} at ${nearbySuggestion.ts}`,
@@ -211,8 +221,8 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
       method: "copilot-diff-coverage",
       provider: "copilot",
       model: latestModel(modelQueries),
-      contribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
-      copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
+      contribution: buildContributionSummary(copilotCoverage, "MEDIUM", mode),
+      copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM", mode),
       evidence: [
         `Copilot-attributed VS Code insertions matched ${copilotCoverage.aiMatchedLines} changed lines`,
         `Estimated Copilot coverage ${copilotCoverage.estimatedAiPercentage}% of changed lines`,
@@ -225,8 +235,8 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
     method: "none",
     provider: null,
     model: null,
-    contribution: buildContributionSummary(coverage, "LOW"),
-    copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
+    contribution: buildContributionSummary(coverage, "LOW", mode),
+    copilotContribution: buildContributionSummary(copilotCoverage, "LOW", mode),
     evidence: [],
   };
 }
@@ -241,22 +251,45 @@ function hashContent(value) {
 
 function calculateAiCoverage(changedLines, snippets) {
   const snippetLineSet = new Set();
+  const snippetBlocks = [];
 
   for (const snippet of snippets) {
-    for (const line of String(snippet)
+    const snippetLines = String(snippet)
       .split(/\r?\n/)
       .map(normalizeWhitespace)
-      .filter((value) => value.length >= 6)) {
+      .filter(isMeaningfulLine);
+
+    if (snippetLines.length >= 2) {
+      snippetBlocks.push(snippetLines);
+    }
+
+    for (const line of snippetLines) {
       snippetLineSet.add(line);
     }
   }
 
   let matchedLineCount = 0;
   const matchedLines = [];
-  for (const changedLine of changedLines) {
+  const matchedIndexes = new Set();
+  for (let index = 0; index < changedLines.length; index += 1) {
+    const changedLine = changedLines[index];
     if (snippetLineSet.has(changedLine)) {
       matchedLineCount += 1;
       matchedLines.push(changedLine);
+      matchedIndexes.add(index);
+    }
+  }
+
+  const blockMatches = findBlockMatches(changedLines, snippetBlocks);
+  for (const block of blockMatches) {
+    for (const index of block.indexes) {
+      if (matchedIndexes.has(index)) {
+        continue;
+      }
+
+      matchedIndexes.add(index);
+      matchedLineCount += 1;
+      matchedLines.push(changedLines[index]);
     }
   }
 
@@ -269,34 +302,96 @@ function calculateAiCoverage(changedLines, snippets) {
   };
 }
 
-function buildContributionSummary(coverage, confidenceLevel) {
+function buildContributionSummary(coverage, confidenceLevel, mode) {
+  const sampleTooSmall = mode === "preview" && coverage.totalChangedLines < MIN_DIFF_LINES_FOR_PERCENTAGE;
+
   return {
     aiMatchedLines: coverage.aiMatchedLines,
     totalChangedLines: coverage.totalChangedLines,
-    estimatedAiPercentage: coverage.estimatedAiPercentage,
-    confidenceLevel,
+    estimatedAiPercentage: sampleTooSmall ? 0 : coverage.estimatedAiPercentage,
+    confidenceLevel: sampleTooSmall ? "LOW" : confidenceLevel,
     matchedLineSamples: coverage.matchedLines,
+    sampleTooSmall,
   };
 }
 
-function buildCopilotContribution(vsCodeLog, diffAnalysis) {
-  const copilotEntries = vsCodeLog.filter((entry) => {
+function buildCopilotContribution(vsCodeLog, diffAnalysis, mode) {
+  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
+  const copilotEntries = recentVsCodeLog.filter((entry) => {
     const provider = String(entry.provider || "").toLowerCase();
     const tool = String(entry.tool || "");
-    return provider === "copilot" || tool !== "" && tool !== "Human / Unknown";
+    return provider === "copilot" || isExplicitTool(tool);
   });
 
   const coverage = calculateAiCoverage(
-    diffAnalysis.changedLines,
+    diffAnalysis.meaningfulChangedLines,
     copilotEntries.map((entry) => entry.contentText).filter((value) => typeof value === "string" && value.trim())
   );
 
   return {
-    ...buildContributionSummary(coverage, coverage.aiMatchedLines > 0 ? "MEDIUM" : "LOW"),
+    ...buildContributionSummary(coverage, coverage.aiMatchedLines > 0 ? "MEDIUM" : "LOW", mode),
     eventCount: copilotEntries.length,
   };
 }
 
 function normalizeWhitespace(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function isMeaningfulLine(line) {
+  const value = normalizeWhitespace(line);
+  if (value.length < MIN_MEANINGFUL_LINE_LENGTH) {
+    return false;
+  }
+
+  if (/^[{}()[\];,]+$/.test(value)) {
+    return false;
+  }
+
+  if (/^(import|export|from|return|const|let|var|module\.exports)\b\s*[^=;]*;?$/i.test(value) && value.length < 30) {
+    return false;
+  }
+
+  return true;
+}
+
+function filterRecentEntries(entries, mode) {
+  if (mode !== "preview") {
+    return entries;
+  }
+
+  const cutoff = Date.now() - PREVIEW_EVENT_WINDOW_MS;
+  return entries.filter((entry) => {
+    const ts = Date.parse(entry.ts || 0);
+    return !Number.isNaN(ts) && ts >= cutoff;
+  });
+}
+
+function isExplicitTool(tool) {
+  const value = String(tool || "");
+  return value !== "" && value !== "Human / Unknown";
+}
+
+function findBlockMatches(changedLines, snippetBlocks) {
+  const matches = [];
+
+  for (const block of snippetBlocks) {
+    for (let start = 0; start <= changedLines.length - block.length; start += 1) {
+      let matchesBlock = true;
+      for (let offset = 0; offset < block.length; offset += 1) {
+        if (changedLines[start + offset] !== block[offset]) {
+          matchesBlock = false;
+          break;
+        }
+      }
+
+      if (matchesBlock) {
+        matches.push({
+          indexes: Array.from({ length: block.length }, (_, i) => start + i),
+        });
+      }
+    }
+  }
+
+  return matches;
 }

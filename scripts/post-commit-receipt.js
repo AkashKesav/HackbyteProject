@@ -33,9 +33,15 @@ function main() {
       console.log(
         `Copilot contribution: matched=${copilotContribution.aiMatchedLines || 0}/${copilotContribution.totalChangedLines || 0} percentage=${copilotContribution.estimatedAiPercentage || 0}% confidence=${copilotContribution.confidenceLevel || "LOW"} events=${copilotContribution.eventCount || 0}`
       );
+      if (copilotContribution.sampleTooSmall) {
+        console.log("Copilot contribution sample is too small for a stable percentage.");
+      }
       console.log(
         `AI contribution: matched=${contribution.aiMatchedLines || 0}/${contribution.totalChangedLines || 0} percentage=${contribution.estimatedAiPercentage || 0}% confidence=${contribution.confidenceLevel || "LOW"}`
       );
+      if (contribution.sampleTooSmall) {
+        console.log("AI contribution sample is too small for a stable percentage.");
+      }
       if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
         for (const line of evidence.evidence) {
           console.log(`- ${line}`);
