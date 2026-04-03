@@ -1,4 +1,5 @@
 const BACKEND_URL = "http://127.0.0.1:4000/api/extension/events";
+const NATIVE_HOST_NAME = "commit_confessional_firefox";
 const URL_PATTERNS = [
   {
     provider: "openai",
@@ -20,6 +21,27 @@ const URL_PATTERNS = [
 
 const recentEvents = new Map();
 const DEDUPE_WINDOW_MS = 2500;
+let nativePort = null;
+
+browser.runtime.onMessage.addListener(async (message) => {
+  if (!message || message.type !== "copy-event") {
+    return;
+  }
+
+  await sendEvent({
+    appName: "firefox",
+    eventType: "copy",
+    provider: message.provider,
+    url: message.url,
+    method: "COPY",
+    tabTitle: message.tabTitle || "",
+    browser: "firefox",
+    contentHash: message.contentHash || null,
+    clipboardPreview: message.preview || "",
+    contentText: message.contentText || "",
+    copiedLength: message.copiedLength || 0,
+  });
+});
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete" || !tab?.url) {
@@ -115,6 +137,10 @@ async function sendEvent(payload) {
   pruneRecentEvents(now);
 
   try {
+    writeToNativeHost({
+      ts: new Date().toISOString(),
+      ...payload,
+    });
     await fetch(BACKEND_URL, {
       method: "POST",
       headers: {
@@ -124,6 +150,24 @@ async function sendEvent(payload) {
     });
   } catch (error) {
     console.error("Failed to send extension event to backend", error);
+  }
+}
+
+function writeToNativeHost(payload) {
+  try {
+    if (!nativePort) {
+      nativePort = browser.runtime.connectNative(NATIVE_HOST_NAME);
+      nativePort.onDisconnect.addListener(() => {
+        nativePort = null;
+      });
+    }
+
+    nativePort.postMessage(payload);
+  } catch (error) {
+    console.warn("Native host unavailable, falling back to extension storage", error);
+    browser.storage.local.set({
+      lastCommitConfessionalEvent: payload,
+    });
   }
 }
 

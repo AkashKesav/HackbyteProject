@@ -11,6 +11,7 @@ import {
   summarizeEventForStorage,
 } from "./services/repoContext.js";
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
+import { buildModelEvidenceReceipt } from "./services/modelEvidence.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -255,6 +256,14 @@ app.post("/api/extension/events", async (req, res) => {
     ok: true,
     message: "Extension event captured",
     capture: stored,
+  });
+});
+
+app.post("/api/receipt", async (req, res) => {
+  const receipt = await buildModelEvidenceReceipt(req.body ?? {});
+  res.status(201).json({
+    ok: true,
+    ...receipt,
   });
 });
 

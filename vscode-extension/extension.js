@@ -1,15 +1,19 @@
 const vscode = require("vscode");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 let outputChannel;
 let activationTimer;
 let copilotLogTimer;
 let lastPromptContext = null;
+let lastManualKeystrokeAt = 0;
 const extensionStates = new Map();
 let watchedCopilotLogPath = null;
 let watchedCopilotLogSize = 0;
 const seenCopilotLogLines = new Set();
+const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
 
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("Commit Confessional");
@@ -96,42 +100,54 @@ async function handleDocumentChange(event) {
     return;
   }
 
+  const now = Date.now();
   const documentPath = event.document?.uri?.fsPath || event.document?.uri?.toString() || "unknown";
   const promptPreview = buildPreview(insertedText);
   const isPromptLike = insertedText.trim().length >= 20 && /[?]|review|explain|fix|generate|write|debug|refactor/i.test(insertedText);
+  const looksTyped = insertedText.length === 1 && !insertedText.includes("\n");
 
   if (isPromptLike) {
     lastPromptContext = {
       source: "text-edit",
-      createdAt: Date.now(),
+      createdAt: now,
       preview: promptPreview,
       documentPath,
     };
   }
 
+  if (looksTyped) {
+    lastManualKeystrokeAt = now;
+    return;
+  }
+
   const clipboardText = await readClipboardSafe();
   const isPaste = detectPaste(insertedText, clipboardText);
+  const inferredSource = classifyInsertionSource(insertedText, now, isPaste);
+  const contentHash = hashContent(isPaste ? clipboardText : insertedText);
 
-  if (!isPaste) {
+  if (inferredSource === "typed") {
     return;
   }
 
   lastPromptContext = {
-    source: "paste",
-    createdAt: Date.now(),
-    preview: buildPreview(clipboardText),
+    source: inferredSource,
+    createdAt: now,
+    preview: buildPreview(isPaste ? clipboardText : insertedText),
     documentPath,
   };
 
-  await emitEvent("paste-detected", {
+  await emitEvent(inferredSource === "paste-event" ? "paste-detected" : "inline-suggestion", {
     appName: "vscode",
-    provider: "editor",
+    provider: inferredSource === "inline-suggestion" ? "copilot" : "editor",
     extensionId: "vscode.editor",
     documentPath,
-    method: "PASTE",
-    eventType: "paste-detected",
+    method: inferredSource === "inline-suggestion" ? "SUGGESTION" : "PASTE",
+    eventType: inferredSource,
     clipboardPreview: buildPreview(clipboardText),
     promptPreview,
+    contentHash,
+    lineCount: insertedText.split(/\r?\n/).length,
+    contentText: isPaste ? clipboardText : insertedText,
   });
 }
 
@@ -173,6 +189,12 @@ async function pollAiExtensionActivation(initial = false) {
 async function emitEvent(label, payload) {
   const line = `[${new Date().toISOString()}] ${label}: ${payload.extensionId || payload.provider} ${payload.promptPreview || ""}`.trim();
   outputChannel.appendLine(line);
+  appendJsonLine(vscodeLogPath, {
+    ts: new Date().toISOString(),
+    label,
+    source: payload.eventType || label,
+    ...payload,
+  });
 
   const backendUrl = getConfig("backendUrl");
   if (!backendUrl) {
@@ -299,6 +321,15 @@ async function pollCopilotLogs(initial = false) {
     seenCopilotLogLines.add(dedupeKey);
     outputChannel.appendLine(`[copilot-model] ${modelHint}`);
     outputChannel.appendLine(normalizedLine);
+    appendJsonLine(vscodeLogPath, {
+      ts: new Date().toISOString(),
+      label: "model-query",
+      source: "copilot-log",
+      provider: "copilot",
+      model: modelHint,
+      rawLine: normalizedLine,
+      logPath: watchedCopilotLogPath,
+    });
     outputChannel.show(true);
   }
 }
@@ -409,6 +440,36 @@ function extractModelHint(line) {
   }
 
   return null;
+}
+
+function classifyInsertionSource(insertedText, now, isPaste) {
+  if (isPaste) {
+    return "paste-event";
+  }
+
+  const isLargeInsertion = insertedText.length > 80 || insertedText.includes("\n");
+  if (isLargeInsertion && now - lastManualKeystrokeAt > 300) {
+    return "inline-suggestion";
+  }
+
+  return "typed";
+}
+
+function hashContent(value) {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) {
+    return null;
+  }
+
+  return `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}`;
+}
+
+function appendJsonLine(filePath, payload) {
+  try {
+    fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
+  } catch (error) {
+    outputChannel.appendLine(`Log write failed: ${error?.message || String(error)}`);
+  }
 }
 
 module.exports = {
