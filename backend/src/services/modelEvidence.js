@@ -220,50 +220,6 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
     };
   }
 
-  const latestCopilotActivation = vsCodeLog.find(
-    (entry) => entry.eventType === "ai-activated" && (entry.provider || "").toLowerCase() === "copilot"
-  );
-  if (latestCopilotActivation) {
-    return {
-      certainty: "PROBABLE",
-      method: "copilot-activity",
-      provider: "copilot",
-      model: latestModel(modelQueries),
-      contribution: buildContributionSummary(copilotCoverage, "LOW"),
-      copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
-      evidence: [`Recent Copilot activation at ${latestCopilotActivation.ts}`],
-    };
-  }
-
-  const latestRequest = firefoxRequests[0];
-  const latestActivation = vsCodeLog.find((entry) => entry.eventType === "ai-activated");
-  if (latestRequest && latestActivation) {
-    return {
-      certainty: "PROBABLE",
-      method: "activity-correlation",
-      provider: latestRequest.provider || latestActivation.provider || "unknown",
-      model: latestModel(modelQueries),
-      contribution: buildContributionSummary(coverage, "LOW"),
-      copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
-      evidence: [
-        `Firefox AI activity at ${latestRequest.ts || latestRequest.timeStamp || "unknown"}`,
-        `VS Code AI activation at ${latestActivation.ts}`,
-      ],
-    };
-  }
-
-  if (modelQueries.length) {
-    return {
-      certainty: "PROBABLE",
-      method: "model-log",
-      provider: "copilot",
-      model: latestModel(modelQueries),
-      contribution: buildContributionSummary(coverage, "LOW"),
-      copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
-      evidence: [`Recent Copilot model log found: ${latestModel(modelQueries)}`],
-    };
-  }
-
   return {
     certainty: "NONE",
     method: "none",
