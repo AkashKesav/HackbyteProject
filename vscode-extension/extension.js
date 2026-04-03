@@ -15,6 +15,7 @@ const crypto = require("node:crypto");
 // Most logic is wrapped in safeRun() to prevent one failure from
 // disabling the whole extension host integration.
 // The command map is used to convert internal command IDs to readable labels.
+// This mapping enables the extension to identify and categorize AI-related commands executed in VS Code.
 
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
@@ -35,6 +36,8 @@ const COPILOT_COMMANDS = {
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
 };
 
+// Global state variables to track extension activation, document changes, and prompt context.
+// These track timers, UI output, and contextual information about user and AI interactions.
 let outputChannel;
 let activationTimer;
 let copilotLogTimer;
@@ -49,6 +52,8 @@ const seenCopilotLogLines = new Set();
 const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
 const TOOL_WINDOW_MS = 3000;
 
+// Main activation function called when the extension is loaded by VS Code.
+// Registers commands, sets up event listeners, and initializes polling timers for monitoring AI extensions.
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("Commit Confessional");
   outputChannel.appendLine("Commit Confessional detector started.");
@@ -152,6 +157,8 @@ function deactivate() {
   }
 }
 
+// Monitors text document changes to detect paste events and inline suggestions from AI providers.
+// Classifies the source of text insertions and logs them as events for analysis.
 async function handleDocumentChange(event) {
   if (!event?.contentChanges?.length) {
     return;
@@ -220,6 +227,8 @@ async function handleDocumentChange(event) {
   });
 }
 
+// Periodically polls the activation status of AI-related extensions and emits events when they activate.
+// Tracks extension state transitions and correlates activations with user prompt context.
 async function pollAiExtensionActivation(initial = false) {
   const now = Date.now();
 
@@ -331,6 +340,8 @@ function normalizeWhitespace(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+// Detects if the inserted text matches the clipboard content to identify paste events.
+// Uses normalized whitespace comparison and respects the configured minimum paste length.
 function buildPreview(value) {
   const text = normalizeWhitespace(value);
   return text.length > 180 ? `${text.slice(0, 177)}...` : text;
@@ -348,6 +359,8 @@ function getConfig(key) {
   return vscode.workspace.getConfiguration("commitConfessional").get(key);
 }
 
+// Safely retrieves clipboard content without throwing errors if clipboard access fails.
+// Returns empty string on failure to prevent extension crashes.
 function shouldIgnoreDocument(document) {
   const fileName = String(document?.fileName || "");
   const uriString = String(document?.uri?.toString?.() || "");
@@ -478,6 +491,8 @@ function walkLogFiles(root) {
   return results;
 }
 
+// Reads new content from a log file starting at the specified offset, handling file size growth.
+// Returns the new log lines and updates the offset for the next read cycle.
 function readNewLogChunk(filePath, offset) {
   let stats;
   try {
@@ -552,6 +567,7 @@ function hashContent(value) {
   return `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}`;
 }
 
+// Persists event data to a JSONL file for offline analysis and audit trail of detected AI interactions.
 function appendJsonLine(filePath, payload) {
   try {
     fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
@@ -560,6 +576,8 @@ function appendJsonLine(filePath, payload) {
   }
 }
 
+// Wraps all action execution in try-catch to prevent unhandled errors from disabling the entire extension.
+// Logs failures to the output channel for debugging and diagnostics.
 function safeRun(label, action) {
   try {
     action();
