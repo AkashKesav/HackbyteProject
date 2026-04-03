@@ -4,6 +4,18 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
+// This extension tracks Copilot-related command usage in VS Code.
+// It listens for command execution and text document changes,
+// then logs events to a local JSONL file for later inspection.
+// The detector is designed to identify Copilot inline suggestions,
+// paste-like insertions, and AI extension activation behavior.
+// This is intended for diagnostics and awareness, not for data exfiltration.
+// The module keeps a lightweight output channel updated with status,
+// and uses timers to periodically poll extension activation and logs.
+// Most logic is wrapped in safeRun() to prevent one failure from
+// disabling the whole extension host integration.
+// The command map is used to convert internal command IDs to readable labels.
+
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
   "editor.action.inlineSuggest.acceptNextLine": "Inline Suggestion (Next Line)",
