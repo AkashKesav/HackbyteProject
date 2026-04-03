@@ -26,8 +26,12 @@ function main() {
 
       const evidence = body.modelEvidence || {};
       const contribution = evidence.contribution || {};
+      const copilotContribution = body.copilotContribution || evidence.copilotContribution || {};
       console.log(
         `Commit Confessional receipt: certainty=${evidence.certainty || "NONE"} model=${evidence.model || "unknown"} method=${evidence.method || "none"}`
+      );
+      console.log(
+        `Copilot contribution: matched=${copilotContribution.aiMatchedLines || 0}/${copilotContribution.totalChangedLines || 0} percentage=${copilotContribution.estimatedAiPercentage || 0}% confidence=${copilotContribution.confidenceLevel || "LOW"} events=${copilotContribution.eventCount || 0}`
       );
       console.log(
         `AI contribution: matched=${contribution.aiMatchedLines || 0}/${contribution.totalChangedLines || 0} percentage=${contribution.estimatedAiPercentage || 0}% confidence=${contribution.confidenceLevel || "LOW"}`

@@ -18,6 +18,7 @@ export async function buildModelEvidenceReceipt(payload = {}) {
   const diffText = buildDiffText(payload);
   const diffAnalysis = analyzeDiff(diffText);
   const evidence = correlateLogs(vsCodeLog, firefoxLog, diffAnalysis);
+  const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis);
 
   return {
     receiptUrl: payload.receiptUrl || null,
@@ -32,6 +33,7 @@ export async function buildModelEvidenceReceipt(payload = {}) {
       totalChangedLines: diffAnalysis.totalChangedLines,
     },
     modelEvidence: evidence,
+    copilotContribution,
   };
 }
 
@@ -128,6 +130,13 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
     .map((entry) => entry.contentText)
     .filter((value) => typeof value === "string" && value.trim());
   const coverage = calculateAiCoverage(diffAnalysis.changedLines, aiSnippets);
+  const copilotCoverage = calculateAiCoverage(
+    diffAnalysis.changedLines,
+    [...vscodePastes, ...vscodeSuggestions]
+      .filter((entry) => (entry.provider || "").toLowerCase() === "copilot" || (entry.tool || "") !== "Human / Unknown")
+      .map((entry) => entry.contentText)
+      .filter((value) => typeof value === "string" && value.trim())
+  );
 
   for (const copy of firefoxCopies) {
     const matchingPaste = vscodePastes.find((paste) => {
@@ -146,6 +155,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         provider: copy.provider || "unknown",
         model: latestModel(modelQueries),
         contribution: buildContributionSummary(coverage, "HIGH"),
+        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
         evidence: [
           `Firefox copy at ${copy.ts} from ${copy.provider || "unknown"}`,
           `VS Code paste at ${matchingPaste.ts} into ${matchingPaste.documentPath || "unknown"}`,
@@ -163,6 +173,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         provider: copy.provider || "unknown",
         model: latestModel(modelQueries),
         contribution: buildContributionSummary(coverage, "HIGH"),
+        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
         evidence: [
           `Firefox copy at ${copy.ts} from ${copy.provider || "unknown"}`,
           `Copied content hash appears in commit diff`,
@@ -184,6 +195,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         provider: copy.provider || "unknown",
         model: latestModel(modelQueries),
         contribution: buildContributionSummary(coverage, "MEDIUM"),
+        copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
         evidence: [
           `Firefox copy at ${copy.ts}`,
           `VS Code ${nearbySuggestion.source || nearbySuggestion.eventType} at ${nearbySuggestion.ts}`,
@@ -191,6 +203,36 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
         ],
       };
     }
+  }
+
+  if (copilotCoverage.aiMatchedLines > 0) {
+    return {
+      certainty: "PROBABLE",
+      method: "copilot-diff-coverage",
+      provider: "copilot",
+      model: latestModel(modelQueries),
+      contribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
+      copilotContribution: buildContributionSummary(copilotCoverage, "MEDIUM"),
+      evidence: [
+        `Copilot-attributed VS Code insertions matched ${copilotCoverage.aiMatchedLines} changed lines`,
+        `Estimated Copilot coverage ${copilotCoverage.estimatedAiPercentage}% of changed lines`,
+      ],
+    };
+  }
+
+  const latestCopilotActivation = vsCodeLog.find(
+    (entry) => entry.eventType === "ai-activated" && (entry.provider || "").toLowerCase() === "copilot"
+  );
+  if (latestCopilotActivation) {
+    return {
+      certainty: "PROBABLE",
+      method: "copilot-activity",
+      provider: "copilot",
+      model: latestModel(modelQueries),
+      contribution: buildContributionSummary(copilotCoverage, "LOW"),
+      copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
+      evidence: [`Recent Copilot activation at ${latestCopilotActivation.ts}`],
+    };
   }
 
   const latestRequest = firefoxRequests[0];
@@ -202,6 +244,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
       provider: latestRequest.provider || latestActivation.provider || "unknown",
       model: latestModel(modelQueries),
       contribution: buildContributionSummary(coverage, "LOW"),
+      copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
       evidence: [
         `Firefox AI activity at ${latestRequest.ts || latestRequest.timeStamp || "unknown"}`,
         `VS Code AI activation at ${latestActivation.ts}`,
@@ -216,6 +259,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
       provider: "copilot",
       model: latestModel(modelQueries),
       contribution: buildContributionSummary(coverage, "LOW"),
+      copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
       evidence: [`Recent Copilot model log found: ${latestModel(modelQueries)}`],
     };
   }
@@ -226,6 +270,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis) {
     provider: null,
     model: null,
     contribution: buildContributionSummary(coverage, "LOW"),
+    copilotContribution: buildContributionSummary(copilotCoverage, "LOW"),
     evidence: [],
   };
 }
@@ -275,6 +320,24 @@ function buildContributionSummary(coverage, confidenceLevel) {
     estimatedAiPercentage: coverage.estimatedAiPercentage,
     confidenceLevel,
     matchedLineSamples: coverage.matchedLines,
+  };
+}
+
+function buildCopilotContribution(vsCodeLog, diffAnalysis) {
+  const copilotEntries = vsCodeLog.filter((entry) => {
+    const provider = String(entry.provider || "").toLowerCase();
+    const tool = String(entry.tool || "");
+    return provider === "copilot" || tool !== "" && tool !== "Human / Unknown";
+  });
+
+  const coverage = calculateAiCoverage(
+    diffAnalysis.changedLines,
+    copilotEntries.map((entry) => entry.contentText).filter((value) => typeof value === "string" && value.trim())
+  );
+
+  return {
+    ...buildContributionSummary(coverage, coverage.aiMatchedLines > 0 ? "MEDIUM" : "LOW"),
+    eventCount: copilotEntries.length,
   };
 }
 

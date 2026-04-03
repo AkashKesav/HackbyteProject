@@ -23,6 +23,7 @@ const PORT = Number(process.env.PORT || 4000);
 const SIM_PROXY_PORT = Number(process.env.SIM_PROXY_PORT || 8877);
 const REAL_PROXY_PORT = Number(process.env.REAL_PROXY_PORT || 8877);
 const ENABLE_LOCAL_PROXY = process.env.ENABLE_LOCAL_PROXY === "true";
+const REPO_CONTEXT_REFRESH_MS = 60 * 1000;
 
 const app = express();
 app.use(cors());
@@ -42,6 +43,7 @@ const state = {
     lastHealthCheckAt: null,
   },
   repoContext: await buildRepoContext(projectRoot),
+  repoContextUpdatedAt: Date.now(),
   latestCommit: await createLatestCommitSnapshot(projectRoot),
   captures: await loadStoredCaptures(),
 };
@@ -51,7 +53,7 @@ state.proxy.lastEventAt = state.captures[0]?.capturedAt ?? null;
 state.proxy.healthy = state.captures.length > 0;
 
 app.get("/api/health", async (_req, res) => {
-  state.repoContext = await buildRepoContext(projectRoot);
+  await refreshRepoContextIfNeeded(true);
   state.latestCommit = await createLatestCommitSnapshot(projectRoot);
   state.proxy.lastHealthCheckAt = new Date().toISOString();
 
@@ -81,7 +83,7 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.get("/api/proxy/status", async (_req, res) => {
-  state.repoContext = await buildRepoContext(projectRoot);
+  await refreshRepoContextIfNeeded(true);
   state.latestCommit = await createLatestCommitSnapshot(projectRoot);
 
   res.json({
@@ -148,7 +150,7 @@ app.all("/proxy/:provider/*", async (req, res) => {
 });
 
 app.get("/api/dashboard", async (_req, res) => {
-  state.repoContext = await buildRepoContext(projectRoot);
+  await refreshRepoContextIfNeeded(true);
   state.latestCommit = await createLatestCommitSnapshot(projectRoot);
 
   res.json({
@@ -311,7 +313,7 @@ async function persistCaptures(captures) {
 }
 
 async function captureProxyEvent(input, source) {
-  state.repoContext = await buildRepoContext(projectRoot);
+  await refreshRepoContextIfNeeded();
   const analysis = analyzeProxyEvent(input, state.repoContext);
   const stored = summarizeEventForStorage(input, analysis);
 
@@ -325,6 +327,19 @@ async function captureProxyEvent(input, source) {
   await persistCaptures(state.captures);
   logCaptureToTerminal(stored, source);
   return stored;
+}
+
+async function refreshRepoContextIfNeeded(force = false) {
+  if (!force && Date.now() - state.repoContextUpdatedAt < REPO_CONTEXT_REFRESH_MS) {
+    return;
+  }
+
+  try {
+    state.repoContext = await buildRepoContext(projectRoot);
+    state.repoContextUpdatedAt = Date.now();
+  } catch (error) {
+    console.warn("Failed to refresh repo context", error?.message || error);
+  }
 }
 
 function mapProviderToHost(provider) {

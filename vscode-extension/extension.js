@@ -4,16 +4,38 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
+const COPILOT_COMMANDS = {
+  "editor.action.inlineSuggest.commit": "Inline Suggestion",
+  "editor.action.inlineSuggest.acceptNextLine": "Inline Suggestion (Next Line)",
+  "editor.action.inlineSuggest.acceptNextWord": "Inline Suggestion (Next Word)",
+  "github.copilot.chat.inlineChat.start": "Inline Chat",
+  "github.copilot.chat.inlineChat.accept": "Inline Chat (Accepted)",
+  "github.copilot.chat.inlineChat.discard": "Inline Chat (Discarded)",
+  "github.copilot.edits.apply": "Copilot Edits",
+  "github.copilot.edits.acceptAllEdits": "Copilot Edits (Accept All)",
+  "github.copilot.edits.acceptFile": "Copilot Edits (Accept File)",
+  "github.copilot.edits.rejectAllEdits": "Copilot Edits (Rejected)",
+  "github.copilot.chat.applyInEditor": "Chat -> Apply in Editor",
+  "github.copilot.chat.insertIntoNewFile": "Chat -> Insert New File",
+  "github.copilot.chat.insertAtCursor": "Chat -> Insert at Cursor",
+  "github.copilot.fixes.apply": "Copilot Fix",
+  "github.copilot.generateTests.apply": "Copilot Generate Tests",
+  "github.copilot.generateDocs.apply": "Copilot Generate Docs",
+};
+
 let outputChannel;
 let activationTimer;
 let copilotLogTimer;
 let lastPromptContext = null;
 let lastManualKeystrokeAt = 0;
+let pendingTool = null;
+let pendingToolTime = 0;
 const extensionStates = new Map();
 let watchedCopilotLogPath = null;
 let watchedCopilotLogSize = 0;
 const seenCopilotLogLines = new Set();
 const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
+const TOOL_WINDOW_MS = 3000;
 
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("Commit Confessional");
@@ -51,10 +73,39 @@ function activate(context) {
       outputChannel.show(true);
     })
   );
+  const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
+  if (typeof onWillExecuteCommand === "function") {
+    context.subscriptions.push(
+      onWillExecuteCommand((event) => {
+        safeRun("onWillExecuteCommand", () => {
+          const commandName = event && typeof event.command === "string" ? event.command : "";
+          const toolName = COPILOT_COMMANDS[commandName];
+          if (!toolName) {
+            return;
+          }
+
+          markTool(toolName);
+          outputChannel.appendLine(`[${new Date().toISOString()}] copilot-command: ${commandName} -> ${toolName}`);
+          appendJsonLine(vscodeLogPath, {
+            ts: new Date().toISOString(),
+            label: "copilot-command",
+            source: "copilot-command",
+            provider: "copilot",
+            command: commandName,
+            tool: toolName,
+          });
+        });
+      })
+    );
+  } else {
+    outputChannel.appendLine("onWillExecuteCommand is not available in this VS Code host.");
+  }
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument((event) => {
-      void handleDocumentChange(event);
+      safeRun("onDidChangeTextDocument", () => {
+        void handleDocumentChange(event);
+      });
     })
   );
 
@@ -94,6 +145,10 @@ async function handleDocumentChange(event) {
     return;
   }
 
+  if (shouldIgnoreDocument(event.document)) {
+    return;
+  }
+
   const change = event.contentChanges[0];
   const insertedText = String(change.text || "");
   if (!insertedText.trim()) {
@@ -122,7 +177,8 @@ async function handleDocumentChange(event) {
 
   const clipboardText = await readClipboardSafe();
   const isPaste = detectPaste(insertedText, clipboardText);
-  const inferredSource = classifyInsertionSource(insertedText, now, isPaste);
+  const activeTool = currentTool();
+  const inferredSource = classifyInsertionSource(insertedText, now, isPaste, activeTool);
   const contentHash = hashContent(isPaste ? clipboardText : insertedText);
 
   if (inferredSource === "typed") {
@@ -148,6 +204,7 @@ async function handleDocumentChange(event) {
     contentHash,
     lineCount: insertedText.split(/\r?\n/).length,
     contentText: isPaste ? clipboardText : insertedText,
+    tool: activeTool,
   });
 }
 
@@ -277,6 +334,21 @@ async function readClipboardSafe() {
 
 function getConfig(key) {
   return vscode.workspace.getConfiguration("commitConfessional").get(key);
+}
+
+function shouldIgnoreDocument(document) {
+  const fileName = String(document?.fileName || "");
+  const uriString = String(document?.uri?.toString?.() || "");
+  const scheme = String(document?.uri?.scheme || "");
+
+  return (
+    scheme === "output" ||
+    scheme === "extension-output" ||
+    fileName.includes("Commit Confessional") ||
+    uriString.includes("Commit Confessional") ||
+    uriString.includes("extension-output") ||
+    fileName.endsWith(".log")
+  );
 }
 
 async function pollCopilotLogs(initial = false) {
@@ -442,9 +514,13 @@ function extractModelHint(line) {
   return null;
 }
 
-function classifyInsertionSource(insertedText, now, isPaste) {
+function classifyInsertionSource(insertedText, now, isPaste, activeTool) {
   if (isPaste) {
     return "paste-event";
+  }
+
+  if (activeTool !== "Human / Unknown") {
+    return "inline-suggestion";
   }
 
   const isLargeInsertion = insertedText.length > 80 || insertedText.includes("\n");
@@ -470,6 +546,27 @@ function appendJsonLine(filePath, payload) {
   } catch (error) {
     outputChannel.appendLine(`Log write failed: ${error?.message || String(error)}`);
   }
+}
+
+function safeRun(label, action) {
+  try {
+    action();
+  } catch (error) {
+    outputChannel.appendLine(`${label} failed: ${error?.message || String(error)}`);
+  }
+}
+
+function markTool(name) {
+  pendingTool = name;
+  pendingToolTime = Date.now();
+}
+
+function currentTool() {
+  if (pendingTool && Date.now() - pendingToolTime < TOOL_WINDOW_MS) {
+    return pendingTool;
+  }
+
+  return "Human / Unknown";
 }
 
 module.exports = {
