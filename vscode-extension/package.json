@@ -1,0 +1,63 @@
+{
+  "name": "commit-confessional-vscode-detector",
+  "displayName": "Commit Confessional VS Code Detector",
+  "description": "Logs paste events and heuristic AI extension activation events to VS Code output and a local backend.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "commitConfessional.showOutput",
+        "title": "Commit Confessional: Show Output"
+      },
+      {
+        "command": "commitConfessional.inspectAiExtensions",
+        "title": "Commit Confessional: Inspect AI Extensions"
+      }
+    ],
+    "configuration": {
+      "title": "Commit Confessional",
+      "properties": {
+        "commitConfessional.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4000/api/extension/events",
+          "description": "Local backend URL that receives extension events."
+        },
+        "commitConfessional.aiExtensions": {
+          "type": "array",
+          "default": [
+            "GitHub.copilot",
+            "GitHub.copilot-chat",
+            "OpenAI.chatgpt",
+            "openai.chatgpt",
+            "openai.codex"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "VS Code extension IDs to watch for activation."
+        },
+        "commitConfessional.promptWindowMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "How long a recent paste or prompt-like edit is considered relevant when correlating AI activation."
+        },
+        "commitConfessional.pasteMinLength": {
+          "type": "number",
+          "default": 12,
+          "description": "Minimum inserted text length before a clipboard match is treated as a paste event."
+        }
+      }
+    }
+  }
+}

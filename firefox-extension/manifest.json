@@ -1,0 +1,36 @@
+{
+  "manifest_version": 2,
+  "name": "Commit Confessional URL Watcher",
+  "version": "0.1.0",
+  "description": "Detects selected AI website URLs in Firefox and forwards them to a local backend terminal logger.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "webRequest",
+    "http://127.0.0.1:4000/*",
+    "http://localhost:4000/*",
+    "*://chatgpt.com/*",
+    "*://*.chatgpt.com/*",
+    "*://openai.com/*",
+    "*://*.openai.com/*",
+    "*://gemini.google.com/*",
+    "*://generativelanguage.googleapis.com/*",
+    "*://claude.ai/*",
+    "*://*.claude.ai/*",
+    "*://anthropic.com/*",
+    "*://*.anthropic.com/*",
+    "*://x.ai/*",
+    "*://*.x.ai/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "commit-confessional-url-watcher@example.local"
+    }
+  }
+}

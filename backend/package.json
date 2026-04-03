@@ -1,0 +1,19 @@
+{
+  "name": "commit-confessional-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "proxy:chrome-on": "powershell -ExecutionPolicy Bypass -File ./scripts/enable-windows-proxy.ps1",
+    "proxy:chrome-off": "powershell -ExecutionPolicy Bypass -File ./scripts/disable-windows-proxy.ps1",
+    "proxy:vscode": "powershell -ExecutionPolicy Bypass -File ./scripts/start-vscode-with-proxy.ps1"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "http-mitm-proxy": "^1.1.0",
+    "morgan": "^1.10.0"
+  }
+}
