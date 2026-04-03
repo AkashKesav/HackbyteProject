@@ -1,2 +1,2 @@
-## Introduction:Hackbyte:
+## Introduction
 First
