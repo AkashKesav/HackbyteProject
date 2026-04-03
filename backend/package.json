@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "proxy:chrome-on": "powershell -ExecutionPolicy Bypass -File ./scripts/enable-windows-proxy.ps1",
     "proxy:chrome-off": "powershell -ExecutionPolicy Bypass -File ./scripts/disable-windows-proxy.ps1",
-    "proxy:vscode": "powershell -ExecutionPolicy Bypass -File ./scripts/start-vscode-with-proxy.ps1"
+    "proxy:vscode": "powershell -ExecutionPolicy Bypass -File ./scripts/start-vscode-with-proxy.ps1",
+    "watch:copilot-logs": "powershell -ExecutionPolicy Bypass -File ./scripts/watch-copilot-logs.ps1"
   },
   "dependencies": {
     "cors": "^2.8.5",
