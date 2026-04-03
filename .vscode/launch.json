@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Hackbyte Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--disable-extensions",
+        "--extensionDevelopmentPath=${workspaceFolder}/hackbyte-taskboard/vscode-extension"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/hackbyte-taskboard/vscode-extension/dist/**/*.js"
+      ],
+      "preLaunchTask": "npm: build - hackbyte-taskboard/vscode-extension"
+    }
+  ]
+}

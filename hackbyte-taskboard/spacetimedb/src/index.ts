@@ -18,15 +18,81 @@ const spacetimedb = schema({
       context: t.string(),
       createdAt: t.timestamp(),
       authorIdentity: t.identity(),
+      resolutionKind: t.string().default('unresolved'),
+      resolutionSource: t.string().default('unresolved'),
+      resolutionContext: t.string().default('Awaiting completion evidence.'),
+      resolutionCommitHash: t.string().default('unlinked'),
+      resolutionDocumentRefs: t.array(t.string()).default([]),
+    }
+  ),
+  taskResolutionEvent: table(
+    {
+      name: 'task_resolution_event',
+      public: true,
+      indexes: [
+        {
+          accessor: 'task_resolution_event_task_id',
+          algorithm: 'btree',
+          columns: ['taskId'],
+        },
+      ],
+    },
+    {
+      id: t.u64().primaryKey().autoInc(),
+      taskId: t.u64(),
+      taskTitle: t.string(),
+      previousStatus: t.string(),
+      newStatus: t.string(),
+      aiResolved: t.bool(),
+      reason: t.string(),
+      resolutionSource: t.string(),
+      commitHash: t.string().optional(),
+      documentRefs: t.array(t.string()),
+      createdAt: t.timestamp(),
+      actorIdentity: t.identity(),
     }
   ),
 });
 export default spacetimedb;
 
 const VALID_STATUSES = new Set(['todo', 'in_progress', 'done']);
+const UNRESOLVED_KIND = 'unresolved';
+const UNRESOLVED_SOURCE = 'unresolved';
+const UNRESOLVED_CONTEXT = 'Awaiting completion evidence.';
+const UNLINKED_COMMIT = 'unlinked';
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
 
 function normalizeTitle(title: string): string {
-  return title.replace(/\s+/g, ' ').trim();
+  return normalizeText(title);
+}
+
+function normalizeOptionalText(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const normalized = normalizeText(value);
+  return normalized || undefined;
+}
+
+function normalizeDocumentRefs(documentRefs: readonly string[]): string[] {
+  const refs: string[] = [];
+  const seen = new Set<string>();
+
+  for (const ref of documentRefs) {
+    const normalized = normalizeText(ref);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    refs.push(normalized);
+  }
+
+  return refs;
 }
 
 function assertStatus(status: string): void {
@@ -35,26 +101,132 @@ function assertStatus(status: string): void {
   }
 }
 
+function buildBaseTaskFields({
+  title,
+  status,
+  source,
+  context,
+  commitHash,
+}: {
+  title: string;
+  status: string;
+  source: string;
+  context: string;
+  commitHash?: string;
+}) {
+  return {
+    title,
+    status,
+    source,
+    commitHash,
+    context,
+    resolutionKind: UNRESOLVED_KIND,
+    resolutionSource: UNRESOLVED_SOURCE,
+    resolutionContext: UNRESOLVED_CONTEXT,
+    resolutionCommitHash: UNLINKED_COMMIT,
+    resolutionDocumentRefs: [] as string[],
+  };
+}
+
+function nextTaskId(ctx: any): bigint {
+  let next = 1n;
+  for (const task of ctx.db.task.iter()) {
+    if (task.id >= next) {
+      next = task.id + 1n;
+    }
+  }
+  return next;
+}
+
+function nextTaskResolutionEventId(ctx: any): bigint {
+  let next = 1n;
+  for (const event of ctx.db.taskResolutionEvent.iter()) {
+    if (event.id >= next) {
+      next = event.id + 1n;
+    }
+  }
+  return next;
+}
+
+function clearResolutionState<T extends {
+  resolutionKind: string;
+  resolutionSource?: string;
+  resolutionContext?: string;
+  resolutionCommitHash?: string;
+  resolutionDocumentRefs: string[];
+}>(task: T): T {
+  return {
+    ...task,
+    resolutionKind: UNRESOLVED_KIND,
+    resolutionSource: UNRESOLVED_SOURCE,
+    resolutionContext: UNRESOLVED_CONTEXT,
+    resolutionCommitHash: UNLINKED_COMMIT,
+    resolutionDocumentRefs: [],
+  };
+}
+
+function insertResolutionEvent(
+  ctx: any,
+  {
+    taskId,
+    taskTitle,
+    previousStatus,
+    newStatus,
+    aiResolved,
+    reason,
+    resolutionSource,
+    commitHash,
+    documentRefs,
+  }: {
+    taskId: bigint;
+    taskTitle: string;
+    previousStatus: string;
+    newStatus: string;
+    aiResolved: boolean;
+    reason: string;
+    resolutionSource: string;
+    commitHash?: string;
+    documentRefs: string[];
+  }
+): void {
+  ctx.db.taskResolutionEvent.insert({
+    id: nextTaskResolutionEventId(ctx),
+    taskId,
+    taskTitle,
+    previousStatus,
+    newStatus,
+    aiResolved,
+    reason,
+    resolutionSource,
+    commitHash,
+    documentRefs,
+    createdAt: ctx.timestamp,
+    actorIdentity: ctx.sender,
+  });
+}
+
 export const init = spacetimedb.init(ctx => {
   ctx.db.task.insert({
-    id: 0n,
-    title: 'Wire realtime reducer instrumentation',
-    status: 'todo',
-    source: 'auto',
-    commitHash: undefined,
-    context:
-      'Agent inferred this from subscription and reducer activity in the current sprint branch.',
+    id: nextTaskId(ctx),
+    ...buildBaseTaskFields({
+      title: 'Wire realtime reducer instrumentation',
+      status: 'todo',
+      source: 'auto',
+      context:
+        'Agent inferred this from subscription and reducer activity in the current sprint branch.',
+    }),
     createdAt: ctx.timestamp,
     authorIdentity: ctx.sender,
   });
 
   ctx.db.task.insert({
-    id: 0n,
-    title: 'Finalize deploy checklist for board release',
-    status: 'in_progress',
-    source: 'manual',
-    commitHash: undefined,
-    context: 'Manual planning item for the current release cut.',
+    id: nextTaskId(ctx),
+    ...buildBaseTaskFields({
+      title: 'Finalize deploy checklist for board release',
+      status: 'in_progress',
+      source: 'manual',
+      context: 'Manual planning item for the current release cut.',
+    }),
     createdAt: ctx.timestamp,
     authorIdentity: ctx.sender,
   });
@@ -75,12 +247,13 @@ export const createTask = spacetimedb.reducer({ title: t.string() }, (ctx, { tit
   }
 
   ctx.db.task.insert({
-    id: 0n,
-    title: normalized,
-    status: 'todo',
-    source: 'manual',
-    commitHash: undefined,
-    context: 'Added manually from the board input.',
+    id: nextTaskId(ctx),
+    ...buildBaseTaskFields({
+      title: normalized,
+      status: 'todo',
+      source: 'manual',
+      context: 'Added manually from the board input.',
+    }),
     createdAt: ctx.timestamp,
     authorIdentity: ctx.sender,
   });
@@ -99,12 +272,14 @@ export const createAutoTask = spacetimedb.reducer(
     }
 
     ctx.db.task.insert({
-      id: 0n,
-      title: normalized,
-      status: 'todo',
-      source: 'auto',
-      commitHash,
-      context,
+      id: nextTaskId(ctx),
+      ...buildBaseTaskFields({
+        title: normalized,
+        status: 'todo',
+        source: 'auto',
+        commitHash: normalizeOptionalText(commitHash),
+        context: normalizeText(context),
+      }),
       createdAt: ctx.timestamp,
       authorIdentity: ctx.sender,
     });
@@ -121,6 +296,57 @@ export const advanceTaskStatus = spacetimedb.reducer(
       throw new SenderError('Task not found.');
     }
 
+    if (task.status === nextStatus) {
+      return;
+    }
+
+    if (nextStatus === 'done') {
+      const updatedTask = {
+        ...task,
+        status: 'done',
+        resolutionKind: 'manual',
+        resolutionSource: 'manual_status_cycle',
+        resolutionContext: 'Task marked done manually from the board.',
+        resolutionCommitHash: task.commitHash ?? UNLINKED_COMMIT,
+        resolutionDocumentRefs: [] as string[],
+      };
+
+      ctx.db.task.id.update(updatedTask);
+      insertResolutionEvent(ctx, {
+        taskId: task.id,
+        taskTitle: task.title,
+        previousStatus: task.status,
+        newStatus: 'done',
+        aiResolved: false,
+        reason: 'Task marked done manually from the board.',
+        resolutionSource: 'manual_status_cycle',
+        commitHash: task.commitHash,
+        documentRefs: [],
+      });
+      return;
+    }
+
+    if (task.status === 'done') {
+      const reopenedTask = {
+        ...clearResolutionState(task),
+        status: nextStatus,
+      };
+
+      ctx.db.task.id.update(reopenedTask);
+      insertResolutionEvent(ctx, {
+        taskId: task.id,
+        taskTitle: task.title,
+        previousStatus: task.status,
+        newStatus: nextStatus,
+        aiResolved: false,
+        reason: `Task moved from done back to ${nextStatus}.`,
+        resolutionSource: 'manual_reopen',
+        commitHash: task.resolutionCommitHash ?? task.commitHash,
+        documentRefs: task.resolutionDocumentRefs,
+      });
+      return;
+    }
+
     ctx.db.task.id.update({ ...task, status: nextStatus });
   }
 );
@@ -133,9 +359,24 @@ export const updateTaskContext = spacetimedb.reducer(
       throw new SenderError('Task not found.');
     }
 
-    ctx.db.task.id.update({ ...task, context: context.trim() });
+    const normalized = normalizeText(context);
+    if (!normalized) {
+      throw new SenderError('Task context is required.');
+    }
+
+    ctx.db.task.id.update({ ...task, context: normalized });
   }
 );
+
+export const deleteTask = spacetimedb.reducer({ id: t.u64() }, (ctx, { id }) => {
+  const task = ctx.db.task.id.find(id);
+  if (!task) {
+    throw new SenderError('Task not found.');
+  }
+
+  ctx.db.taskResolutionEvent.task_resolution_event_task_id.delete(task.id);
+  ctx.db.task.id.delete(task.id);
+});
 
 export const seedAutoTask = spacetimedb.reducer(
   {
@@ -150,14 +391,70 @@ export const seedAutoTask = spacetimedb.reducer(
     }
 
     ctx.db.task.insert({
-      id: 0n,
-      title: normalized,
-      status: 'todo',
-      source: 'auto',
-      commitHash,
-      context,
+      id: nextTaskId(ctx),
+      ...buildBaseTaskFields({
+        title: normalized,
+        status: 'todo',
+        source: 'auto',
+        commitHash: normalizeOptionalText(commitHash),
+        context: normalizeText(context),
+      }),
       createdAt: ctx.timestamp,
       authorIdentity: ctx.sender,
+    });
+  }
+);
+
+export const resolveTaskFromInference = spacetimedb.reducer(
+  {
+    id: t.u64(),
+    reason: t.string(),
+    resolutionSource: t.string(),
+    commitHash: t.string().optional(),
+    documentRefs: t.array(t.string()),
+  },
+  (ctx, { id, reason, resolutionSource, commitHash, documentRefs }) => {
+    const task = ctx.db.task.id.find(id);
+    if (!task) {
+      throw new SenderError('Task not found.');
+    }
+
+    if (task.status === 'done') {
+      throw new SenderError('Task is already resolved.');
+    }
+
+    const normalizedReason = normalizeText(reason);
+    if (!normalizedReason) {
+      throw new SenderError('Resolution reason is required.');
+    }
+
+    const normalizedResolutionSource =
+      normalizeOptionalText(resolutionSource) ?? 'gemini_commit_doc_match';
+    const normalizedCommitHash = normalizeOptionalText(commitHash);
+    const normalizedDocumentRefs = normalizeDocumentRefs(documentRefs);
+
+    const resolvedTask = {
+      ...task,
+      status: 'done',
+      commitHash: normalizedCommitHash ?? task.commitHash,
+      resolutionKind: 'ai',
+      resolutionSource: normalizedResolutionSource,
+      resolutionContext: normalizedReason,
+      resolutionCommitHash: normalizedCommitHash ?? task.commitHash ?? UNLINKED_COMMIT,
+      resolutionDocumentRefs: normalizedDocumentRefs,
+    };
+
+    ctx.db.task.id.update(resolvedTask);
+    insertResolutionEvent(ctx, {
+      taskId: task.id,
+      taskTitle: task.title,
+      previousStatus: task.status,
+      newStatus: 'done',
+      aiResolved: true,
+      reason: normalizedReason,
+      resolutionSource: normalizedResolutionSource,
+      commitHash: normalizedCommitHash,
+      documentRefs: normalizedDocumentRefs,
     });
   }
 );

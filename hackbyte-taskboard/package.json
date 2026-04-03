@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "generate": "cargo run -p gen-bindings -- --out-dir src/module_bindings --module-path spacetimedb && prettier --write src/module_bindings",
-    "spacetime:generate": "spacetime generate --lang typescript --out-dir src/module_bindings --module-path spacetimedb",
+    "generate": "cargo run -p gen-bindings -- --out-dir shared/module_bindings --module-path spacetimedb && prettier --write shared/module_bindings",
+    "spacetime:generate": "spacetime generate --lang typescript --out-dir shared/module_bindings --module-path spacetimedb",
     "spacetime:publish:local": "spacetime publish --module-path spacetimedb --server local hackbyte-taskboard",
     "spacetime:publish": "spacetime publish --module-path spacetimedb --server maincloud hackbyte-taskboard",
     "spacetime:start": "spacetime start"

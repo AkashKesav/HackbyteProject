@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>FORGE_WORKSPACE</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;700&amp;family=Geist+Mono:wght@100..900&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-tertiary-fixed": "#001e2b",
+                    "surface-tint": "#ffb59a",
+                    "on-surface": "#e0e3e8",
+                    "on-error-container": "#ffdad6",
+                    "background": "#101418",
+                    "on-secondary-fixed": "#161c27",
+                    "inverse-surface": "#e0e3e8",
+                    "outline": "#a98a7f",
+                    "surface": "#101418",
+                    "on-primary-fixed-variant": "#802a00",
+                    "surface-bright": "#353a3e",
+                    "tertiary": "#71d2ff",
+                    "surface-container-high": "#262a2f",
+                    "surface-variant": "#31353a",
+                    "error": "#ffb4ab",
+                    "error-container": "#93000a",
+                    "on-surface-variant": "#e2bfb3",
+                    "on-tertiary-fixed-variant": "#004d66",
+                    "secondary-fixed": "#dde2f2",
+                    "secondary-container": "#414754",
+                    "on-secondary-container": "#afb5c4",
+                    "on-tertiary-container": "#003648",
+                    "on-tertiary": "#003547",
+                    "on-secondary": "#2b303c",
+                    "surface-container-highest": "#31353a",
+                    "on-primary-fixed": "#380d00",
+                    "inverse-primary": "#a83900",
+                    "tertiary-fixed-dim": "#71d2ff",
+                    "primary-container": "#ff6b2b",
+                    "on-primary": "#5b1b00",
+                    "tertiary-container": "#00a5d7",
+                    "on-error": "#690005",
+                    "on-secondary-fixed-variant": "#414754",
+                    "primary": "#ffb59a",
+                    "tertiary-fixed": "#c0e8ff",
+                    "outline-variant": "#594138",
+                    "on-primary-container": "#5c1c00",
+                    "surface-dim": "#101418",
+                    "secondary-fixed-dim": "#c1c6d6",
+                    "surface-container-lowest": "#0a0f13",
+                    "primary-fixed": "#ffdbce",
+                    "primary-fixed-dim": "#ffb59a",
+                    "on-background": "#e0e3e8",
+                    "surface-container": "#1c2024",
+                    "inverse-on-surface": "#2d3135",
+                    "secondary": "#c1c6d6",
+                    "surface-container-low": "#181c20"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0px",
+                    "lg": "0px",
+                    "xl": "0px",
+                    "full": "9999px"
+            },
+            "fontFamily": {
+                    "headline": ["Space Grotesk"],
+                    "body": ["Geist Mono"],
+                    "label": ["Geist Mono"],
+                    "mono": ["Geist Mono"]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body { font-family: 'Geist Mono', monospace; background-color: #080c10; color: #e0e3e8; }
+        h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; text-transform: uppercase; letter-spacing: -0.02em; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24; font-size: 18px; }
+        .border-spine { border-color: rgba(255,255,255,0.06); }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #31353a; }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden">
+<!-- LEFT PANEL: SideNavBar -->
+<aside class="fixed left-0 top-0 flex flex-col h-full z-50 w-[240px] bg-[#0f1520] border-r border-white/10">
+<div class="p-6">
+<div class="font-black text-xl tracking-widest text-[#ff6b2b]">FORGE</div>
+<div class="font-mono uppercase tracking-tighter text-[10px] text-slate-500 mt-1">V0.4.2</div>
+</div>
+<nav class="flex-grow mt-4">
+<ul class="space-y-1">
+<li class="border-l-2 border-[#ff6b2b] bg-white/5 text-[#ff6b2b] pl-3 py-2 flex items-center gap-3 cursor-pointer">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-mono uppercase tracking-tighter text-xs">Board</span>
+</li>
+<li class="border-l-2 border-transparent text-slate-400 pl-3 py-2 flex items-center gap-3 hover:bg-white/5 hover:text-white transition-none cursor-pointer">
+<span class="material-symbols-outlined" data-icon="auto_stories">auto_stories</span>
+<span class="font-mono uppercase tracking-tighter text-xs">Lore</span>
+</li>
+<li class="border-l-2 border-transparent text-slate-400 pl-3 py-2 flex items-center gap-3 hover:bg-white/5 hover:text-white transition-none cursor-pointer">
+<span class="material-symbols-outlined" data-icon="flag">flag</span>
+<span class="font-mono uppercase tracking-tighter text-xs">Flags</span>
+</li>
+<li class="border-l-2 border-transparent text-slate-400 pl-3 py-2 flex items-center gap-3 hover:bg-white/5 hover:text-white transition-none cursor-pointer">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="font-mono uppercase tracking-tighter text-xs">Settings</span>
+</li>
+</ul>
+</nav>
+<div class="p-4 border-t border-white/5 space-y-4">
+<button class="w-full bg-[#ff6b2b] text-[#5b1b00] py-2 font-mono text-[10px] font-bold uppercase tracking-widest hover:opacity-90 active:scale-[0.98]">
+                NEW_TICKET
+            </button>
+<div class="flex flex-col gap-3">
+<div class="flex items-center gap-3 group cursor-pointer">
+<div class="relative">
+<img alt="USER_01" class="w-8 h-8 grayscale contrast-125" data-alt="close-up portrait of a tech professional, high contrast black and white photography, sharp focus" src="https://lh3.googleusercontent.com/aida-public/AB6AXuD_rPU1FODfR5RJtQPPzIs_wee5nJzuAAO7uUF2z5GIHennLgipghBxxXN3W6UT6T9BxTYISN0g0rvuN51PGfNxSecbvUvO9kb6gLbVR_WgCwsnettyuj36RFia44up09sUcLEsyH8QifMsFVmgxHR5KeafJZhCny4B2WWhAH5lWsWCmOa-BfZT29hFSLV0g4n1_WdF-KmuWUvnUkisdVtzUH-TSS36x3vZ5l7CRQGSI20tKp2TglZhSGoDgrCaqzVCvbqRQpIgUA"/>
+<div class="absolute bottom-0 right-0 w-2 h-2 bg-green-500 rounded-full border border-[#0f1520]"></div>
+</div>
+<span class="font-mono uppercase tracking-tighter text-xs text-slate-400 group-hover:text-white">USER_01</span>
+</div>
+<div class="flex items-center gap-3 group cursor-pointer">
+<div class="relative">
+<img alt="USER_02" class="w-8 h-8 grayscale contrast-125" data-alt="close-up portrait of a developer, high contrast studio lighting, monochromatic style" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCT04K51JnE6FJ7RLpY149bI5sDRVUyPyOC-y5lFQkCUwD6X7PkXgfeNrt3GYbYADS5R_rDWTdBp9ykM5uueukzk2R0xDERc91zusLKAOvXJbwVmOTu6f2hupICCbD9YOunZjcXjNrvg2EAA9y3gENtuQHEKw5bKl4Pu-JV3lGNO4cCdmLYr18qRgS1ZeuAWhG8RJwdSdkIXc6fFdbekQWrzhAGEKB5CpTladgfbK-AnM9pO0rt67icILoxBNfbyceCxYJfx7Z2-A"/>
+<div class="absolute bottom-0 right-0 w-2 h-2 bg-slate-600 rounded-full border border-[#0f1520]"></div>
+</div>
+<span class="font-mono uppercase tracking-tighter text-xs text-slate-400 group-hover:text-white">USER_02</span>
+</div>
+</div>
+</div>
+</aside>
+<!-- MAIN WRAPPER -->
+<main class="flex flex-col flex-grow ml-[240px] mr-[320px] h-screen bg-[#080c10]">
+<!-- TOP NAV BAR -->
+<header class="flex items-center justify-between px-4 w-full h-12 border-b border-spine bg-[#080c10] shrink-0">
+<div class="flex items-center gap-6">
+<span class="font-bold text-white font-mono text-xs uppercase tracking-widest">FORGE_WORKSPACE</span>
+<div class="flex items-center gap-4">
+<span class="text-[#ff6b2b] font-bold font-mono text-[10px] border-b border-[#ff6b2b]">SESSION_ID: 8821</span>
+<span class="text-slate-500 font-mono text-[10px] hover:text-[#ff6b2b] cursor-crosshair">BRANCH: MAIN</span>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2 px-2 py-1 bg-white/5 border border-white/10">
+<span class="material-symbols-outlined text-slate-500" data-icon="search">search</span>
+<input class="bg-transparent border-none focus:ring-0 text-[10px] font-mono p-0 w-32 placeholder-slate-600 uppercase" placeholder="CMD+K" type="text"/>
+</div>
+<span class="material-symbols-outlined text-slate-400 hover:text-[#ff6b2b] cursor-crosshair" data-icon="terminal">terminal</span>
+<span class="material-symbols-outlined text-slate-400 hover:text-[#ff6b2b] cursor-crosshair" data-icon="notifications">notifications</span>
+<button class="px-4 py-1.5 border border-spine text-[10px] font-mono text-slate-300 hover:border-[#ff6b2b] hover:text-[#ff6b2b]">DEPLOY</button>
+</div>
+</header>
+<!-- CENTER CONTENT: MAIN BOARD -->
+<section class="flex-grow flex flex-col overflow-hidden">
+<!-- Header/Controls -->
+<div class="p-6 border-b border-spine flex justify-between items-end">
+<div>
+<h1 class="text-4xl font-bold text-white leading-none">Sprint_04_Log</h1>
+<p class="text-[10px] font-mono text-slate-500 mt-2 uppercase tracking-tighter">Active Tasks: 12 / Total Scope: 42</p>
+</div>
+<div class="flex gap-1">
+<div class="px-3 py-1 bg-white/5 border border-spine text-[10px] font-mono uppercase text-slate-400 hover:bg-[#ff6b2b]/10 hover:text-[#ff6b2b] cursor-pointer">Filter</div>
+<div class="px-3 py-1 bg-white/5 border border-spine text-[10px] font-mono uppercase text-slate-400 hover:bg-[#ff6b2b]/10 hover:text-[#ff6b2b] cursor-pointer">Sort</div>
+</div>
+</div>
+<!-- Task Board (Bento Style Grid) -->
+<div class="p-6 grid grid-cols-3 gap-0 border-collapse overflow-y-auto">
+<!-- Column 1: TODO -->
+<div class="border border-spine p-4 bg-[#0f1520]">
+<div class="flex justify-between items-center mb-6">
+<h2 class="text-xs font-bold text-slate-300 flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-slate-500"></span>
+                            TODO_STACK
+                        </h2>
+<span class="text-[10px] font-mono text-slate-600">[04]</span>
+</div>
+<div class="space-y-4">
+<div class="border border-spine p-3 bg-[#080c10] hover:border-white/20 transition-colors cursor-pointer group">
+<div class="flex justify-between items-start mb-2">
+<span class="text-[9px] font-mono text-[#ff6b2b] bg-[#ff6b2b]/10 px-1">TASK-882</span>
+<span class="material-symbols-outlined text-[14px] text-slate-700" data-icon="drag_handle">drag_handle</span>
+</div>
+<p class="text-xs text-slate-200 leading-relaxed font-bold">Optimize database indexing for lore_query_logs</p>
+<div class="mt-4 flex justify-between items-center">
+<div class="flex -space-x-1">
+<img class="w-5 h-5 grayscale border border-[#080c10]" data-alt="minimalist user avatar, flat design, grayscale" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAPEgz7RmaBTcxjzjPA-v4uBqY7F0rnB5XFStRoY50ZKWy33UuzYf1qzLaEPUi0WvlhLHTfpRTCLjg51H8jb5GkzzXeOVh7NoJTm8rM9kpVIZ1PnqbT-FB_kBQ3XPOXhmneMtx6uTlAbx6TvSZxTuUa-UEeJcu3Rx1MZ_cUxqC4Vb_UXFyAPOw1OCSMA9_tn5B1i7tb5-KSM8XrX4jsbQzYHfH7NXqUjGqm1pm8s1YnqgnS6wHK_9nBFAeXp3aDKmJItmqYIRCbrg"/>
+</div>
+<span class="text-[9px] font-mono text-slate-600">3D AGO</span>
+</div>
+</div>
+<div class="border border-spine p-3 bg-[#080c10] hover:border-white/20 transition-colors cursor-pointer group">
+<div class="flex justify-between items-start mb-2">
+<span class="text-[9px] font-mono text-slate-500 border border-slate-800 px-1">TASK-885</span>
+</div>
+<p class="text-xs text-slate-200 leading-relaxed">Fix UI alignment in mobile preview drawer</p>
+<div class="mt-4 flex items-center gap-2">
+<span class="text-[9px] font-mono bg-blue-500/10 text-blue-400 px-1">FRONTEND</span>
+<span class="text-[9px] font-mono bg-red-500/10 text-red-400 px-1">BUG</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Column 2: IN PROGRESS -->
+<div class="border border-spine p-4 bg-[#0f1520] border-l-0">
+<div class="flex justify-between items-center mb-6">
+<h2 class="text-xs font-bold text-slate-300 flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-[#ff6b2b]"></span>
+                            ACTIVE_EXECUTION
+                        </h2>
+<span class="text-[10px] font-mono text-slate-600">[02]</span>
+</div>
+<div class="space-y-4">
+<div class="border border-[#ff6b2b]/30 p-3 bg-[#080c10] relative overflow-hidden group">
+<div class="absolute top-0 right-0 w-16 h-16 opacity-5 pointer-events-none">
+<span class="material-symbols-outlined text-6xl" data-icon="bolt">bolt</span>
+</div>
+<div class="flex justify-between items-start mb-2">
+<span class="text-[9px] font-mono text-[#ff6b2b]">TASK-881</span>
+<span class="material-symbols-outlined text-[14px] text-[#ff6b2b]" data-icon="sync" style="font-variation-settings: 'FILL' 0;">sync</span>
+</div>
+<p class="text-xs text-white leading-relaxed font-bold">Implement high-frequency rate limiter for API auth</p>
+<div class="mt-4 flex items-center gap-3">
+<img class="w-5 h-5 grayscale" data-alt="professional user headshot, harsh cinematic lighting, monochrome" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCC9XGB8ktgGy_-fG5Ctd8e0D1bg1iCTtuOHeKjjsHbC4Vxzkob5BnrBaX5Kj5WsMrFa-0PRs2hk-PAZgAycIEhb095Pc3J9Wspqf4Aai1b-Cb06kLLA2wVUgBxqxlJXFDj_ZsVNfXAMwX27BnpBLiN3At_1XsSo0DXSoNl0zsFcnS0pVMQYSFsceCk_SaFg_GwJQrntxUJegVQnZ3BtYCX1o9KYdzbhtFYj5wu2N8RPIkw684kN3BPHRIkmkFeZupKUZMHk-MTHg"/>
+<div class="h-1 flex-grow bg-white/5">
+<div class="h-full bg-[#ff6b2b]" style="width: 65%;"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Column 3: DONE -->
+<div class="border border-spine p-4 bg-[#0f1520] border-l-0">
+<div class="flex justify-between items-center mb-6">
+<h2 class="text-xs font-bold text-slate-300 flex items-center gap-2">
+<span class="w-1.5 h-1.5 bg-green-500"></span>
+                            STABLE_RELEASE
+                        </h2>
+<span class="text-[10px] font-mono text-slate-600">[06]</span>
+</div>
+<div class="space-y-4 opacity-50">
+<div class="border border-spine p-3 bg-[#080c10] line-through decoration-slate-600">
+<p class="text-xs text-slate-400">Initialize repository architecture</p>
+<div class="mt-2 text-[9px] font-mono text-green-500 flex items-center gap-1">
+<span class="material-symbols-outlined text-[10px]" data-icon="check_circle">check_circle</span>
+                                COMPLETED
+                            </div>
+</div>
+</div>
+</div>
+</div>
+</section>
+</main>
+<!-- RIGHT PANEL: Context Drawer -->
+<aside class="fixed right-0 top-0 w-[320px] h-full bg-[#0f1520] border-l border-spine flex flex-col z-50">
+<!-- Live Activity -->
+<div class="p-4 border-b border-spine flex-grow overflow-y-auto">
+<h3 class="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">Live_Activity_Feed</h3>
+<div class="space-y-6">
+<div class="flex gap-3 items-start relative">
+<div class="w-1 h-full absolute left-[11px] top-6 bg-white/5"></div>
+<img class="w-6 h-6 grayscale border border-spine z-10" data-alt="close up of a person's face, tech aesthetic, dark studio background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuD8u3zTOJLnKeZt68tvRwYQ04goKEwwHhK5hTSDqJo6c2A4HsbeTDAdVgntJYead0Yf7hqTM1_rvyw2lcdtm0nO48E__t12NmT3HoMR2TMb6GfmW8ndwlsi9N-CgS8nC1KLqDrYnqm2POLjf2xm5Lx1syo6maICUbEvlf4xSDxsLYLcOpOCNajVikIjT1FSndiws8hgwqc4Jss8C-0EB9YLbbO5E0IqB1ejerlUkZteEFzrQbAzB0WYOpmThPrmq1OpOFadsApcrw"/>
+<div class="flex flex-col gap-1">
+<p class="text-[11px] text-slate-300 leading-tight">
+<span class="text-white font-bold">Akash</span> added task from commit <span class="text-[#ff6b2b] font-mono">a3f9b2</span>
+</p>
+<span class="text-[9px] font-mono text-slate-600">2M AGO</span>
+</div>
+</div>
+<div class="flex gap-3 items-start relative">
+<div class="w-1 h-full absolute left-[11px] top-6 bg-white/5"></div>
+<img class="w-6 h-6 grayscale border border-spine z-10" data-alt="professional portrait, neutral expression, high contrast lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCucfaMfveK77Ghay4VPAbPPY9EjQkIeWoHYvArT_i6VEyiWYWBRPuF1TCrrLGUWa87tGX-Byecb6zYUBWF9Rcnp4-A5VcKUFWtgeDtRDAiLsBjhdvEOoHinJTtrvwV6rw0e5jKx9R4hMZ-rH4FKpLs2kd73HytqbNOt-Jv5RpUzCEhH3BFg900O7TUn6KFfpGTJ8F0e70lV4OETYxebfN8xzQW3olef4vsFdXUd8TZ_89mojL5Etd2MgfvDZ9K9YI0uswigzBuVg"/>
+<div class="flex flex-col gap-1">
+<p class="text-[11px] text-slate-300 leading-tight">
+<span class="text-white font-bold">Priya</span> marked <span class="border-b border-slate-700">auth rate limiter</span> as done
+                        </p>
+<span class="text-[9px] font-mono text-slate-600">14M AGO</span>
+</div>
+</div>
+<div class="flex gap-3 items-start relative">
+<img class="w-6 h-6 grayscale border border-spine z-10" data-alt="modern avatar, minimalist style, dark tones" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDYGvT_BeRh5ybqvAhk7VbpqkiirDNHzUJbHBqg9EZInXo7w0chDOoHbrR9IAbSHRO8yU52xd7nsfLXQOHCdqVzKHSTeqSnnBuLU9cOLh6v5T4B-fRb8IpBIKX0skojwaEARd7NFQBlTDHmP9egKxGMlrzgD6xiqBeo0oLNPhh9AxndzAofMORrBJ0BgKPNT5VId8oph8BksyeNNduMC_mPK3UuvEVhsLCb1EFdaVhm2S-JTr5WhLw1r7MOfsrcJqF5v7Moyk3o7g"/>
+<div class="flex flex-col gap-1">
+<p class="text-[11px] text-slate-300 leading-tight">
+<span class="text-white font-bold">System</span> automatically deployed branch <span class="text-blue-400 font-mono">hotfix/880</span>
+</p>
+<span class="text-[9px] font-mono text-slate-600">45M AGO</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Collapsed Lore Card -->
+<div class="p-4 border-b border-spine group hover:bg-white/5 cursor-pointer transition-colors">
+<div class="flex justify-between items-center mb-3">
+<h3 class="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em]">Lore_Snippet</h3>
+<span class="material-symbols-outlined text-slate-600 group-hover:text-white" data-icon="expand_more">expand_more</span>
+</div>
+<div class="bg-[#080c10] p-3 border border-spine border-l-2 border-l-blue-500">
+<p class="text-[10px] font-mono text-slate-400 leading-relaxed">
+                    The Forge Protocol (v0.1) dictates that all session-id strings must be generated via a salted SHA-256...
+                </p>
+</div>
+</div>
+<!-- Collapsed Flags Card -->
+<div class="p-4 group hover:bg-white/5 cursor-pointer transition-colors">
+<div class="flex justify-between items-center mb-3">
+<h3 class="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em]">Active_Flags</h3>
+<span class="material-symbols-outlined text-slate-600 group-hover:text-white" data-icon="expand_more">expand_more</span>
+</div>
+<div class="flex items-center gap-3">
+<div class="w-2 h-2 rounded-full bg-[#ff6b2b] animate-pulse"></div>
+<span class="text-[10px] font-mono text-white">BETA_RELEASE_TOGGLE: ON</span>
+</div>
+</div>
+</aside>
+</body></html>

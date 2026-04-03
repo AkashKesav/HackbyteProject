@@ -1,11 +1,15 @@
 import type { CSSProperties, FormEvent } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useReducer, useSpacetimeDB, useTable } from 'spacetimedb/react';
-import { reducers, tables } from './module_bindings';
-import type { Task as TaskRow } from './module_bindings/types';
+import { reducers, tables } from '../shared/module_bindings';
+import type {
+  Task as TaskRow,
+  TaskResolutionEvent as TaskResolutionEventRow,
+} from '../shared/module_bindings/types';
 import './app.css';
 
 type TaskStatus = 'todo' | 'in_progress' | 'done';
+type TaskTimestamp = TaskRow['createdAt'] | TaskResolutionEventRow['createdAt'];
 
 const STATUS_ORDER: TaskStatus[] = ['todo', 'in_progress', 'done'];
 
@@ -42,6 +46,11 @@ const EMPTY_STATE_COPY: Record<TaskStatus, { tag: string; body: string }> = {
   },
 };
 
+const UNRESOLVED_KIND = 'unresolved';
+const UNRESOLVED_SOURCE = 'unresolved';
+const UNRESOLVED_CONTEXT = 'Awaiting completion evidence.';
+const UNLINKED_COMMIT = 'unlinked';
+
 function normalizeStatus(value: string): TaskStatus {
   const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
   if (normalized === 'in_progress' || normalized === 'done') {
@@ -73,7 +82,7 @@ function identityHex(identity: unknown): string | undefined {
   return undefined;
 }
 
-function getTimestampMicros(value: TaskRow['createdAt']): bigint | null {
+function getTimestampMicros(value: TaskTimestamp): bigint | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -96,7 +105,7 @@ function getTimestampMicros(value: TaskRow['createdAt']): bigint | null {
   return null;
 }
 
-function toDateLabel(value: TaskRow['createdAt']): string {
+function toDateLabel(value: TaskTimestamp): string {
   const micros = getTimestampMicros(value);
   if (micros !== null) {
     const millis = Number(micros / 1000n);
@@ -113,21 +122,48 @@ function toDateLabel(value: TaskRow['createdAt']): string {
   return 'timestamp.pending';
 }
 
+function visibleCommitHash(task: TaskRow): string | undefined {
+  if (task.resolutionCommitHash && task.resolutionCommitHash !== UNLINKED_COMMIT) {
+    return task.resolutionCommitHash;
+  }
+
+  return task.commitHash ?? undefined;
+}
+
 function taskSortTime(value: TaskRow['createdAt']): bigint {
   return getTimestampMicros(value) ?? 0n;
+}
+
+function resolutionEventSortTime(value: TaskResolutionEventRow['createdAt']): bigint {
+  return getTimestampMicros(value) ?? 0n;
+}
+
+function hasResolution(task: TaskRow): boolean {
+  return normalizeStatus(task.status) === 'done' && task.resolutionKind !== UNRESOLVED_KIND;
+}
+
+function resolutionSourceLabel(task: TaskRow): string | undefined {
+  return task.resolutionSource !== UNRESOLVED_SOURCE ? task.resolutionSource : undefined;
+}
+
+function resolutionContextLabel(task: TaskRow): string | undefined {
+  return task.resolutionContext !== UNRESOLVED_CONTEXT ? task.resolutionContext : undefined;
 }
 
 function App() {
   const conn = useSpacetimeDB();
   const [taskRows, tasksReady] = useTable(tables.task);
+  const [resolutionEvents] = useTable(tables.taskResolutionEvent);
 
   const createTask = useReducer(reducers.createTask);
   const advanceTaskStatus = useReducer(reducers.advanceTaskStatus);
+  const deleteTask = useReducer(reducers.deleteTask);
 
   const [draftTask, setDraftTask] = useState('');
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [pendingCreate, setPendingCreate] = useState(false);
   const [pendingAdvanceId, setPendingAdvanceId] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [arrivingIds, setArrivingIds] = useState<Set<string>>(new Set());
 
   const firstSyncRef = useRef(false);
@@ -163,6 +199,29 @@ function App() {
 
     return groups;
   }, [taskRows]);
+
+  const latestResolutionEventByTaskId = useMemo(() => {
+    const next = new Map<string, TaskResolutionEventRow>();
+
+    for (const event of resolutionEvents) {
+      if (normalizeStatus(event.newStatus) !== 'done') {
+        continue;
+      }
+
+      const taskId = event.taskId.toString();
+      const current = next.get(taskId);
+      if (!current) {
+        next.set(taskId, event);
+        continue;
+      }
+
+      if (resolutionEventSortTime(event.createdAt) > resolutionEventSortTime(current.createdAt)) {
+        next.set(taskId, event);
+      }
+    }
+
+    return next;
+  }, [resolutionEvents]);
 
   useEffect(() => {
     if (!tasksReady) {
@@ -237,7 +296,7 @@ function App() {
   };
 
   const onAdvanceTask = async (task: TaskRow) => {
-    if (!connected || pendingAdvanceId) {
+    if (!connected || pendingAdvanceId || pendingDeleteId) {
       return;
     }
 
@@ -247,6 +306,26 @@ function App() {
       await advanceTaskStatus({ id: task.id, nextStatus: next });
     } finally {
       setPendingAdvanceId(null);
+    }
+  };
+
+  const onDeleteTask = async (task: TaskRow) => {
+    if (!connected || pendingAdvanceId || pendingDeleteId) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete task "${task.title}"? This also removes its resolution history.`);
+    if (!confirmed) {
+      return;
+    }
+
+    const taskId = task.id.toString();
+    setPendingDeleteId(taskId);
+    try {
+      await deleteTask({ id: task.id });
+      setExpandedTaskId(prev => (prev === taskId ? null : prev));
+    } finally {
+      setPendingDeleteId(null);
     }
   };
 
@@ -338,8 +417,16 @@ function App() {
                       const taskId = task.id.toString();
                       const isExpanded = expandedTaskId === taskId;
                       const isAuto = task.source === 'auto';
+                      const resolutionEvent = latestResolutionEventByTaskId.get(taskId);
+                      const isResolved = hasResolution(task);
+                      const isAiResolved =
+                        isResolved && (task.resolutionKind === 'ai' || resolutionEvent?.aiResolved === true);
                       const isArriving = arrivingIds.has(taskId);
                       const normalizedStatus = normalizeStatus(task.status);
+                      const commitHash = visibleCommitHash(task);
+                      const resolutionDocumentRefs = task.resolutionDocumentRefs ?? [];
+                      const resolutionSource = resolutionSourceLabel(task);
+                      const resolutionContext = resolutionContextLabel(task);
                       const cardStyle: CSSProperties = {};
 
                       if (isAuto) {
@@ -369,40 +456,104 @@ function App() {
                                     AI
                                   </span>
                                 ) : null}
+                                {isAiResolved ? (
+                                  <span className="rounded-sm border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-[3px] font-mono text-[9px] uppercase tracking-[0.22em] text-emerald-300">
+                                    AI Resolved
+                                  </span>
+                                ) : null}
                               </div>
 
                               <p className="mt-2 text-[14px] leading-5 text-zinc-100">{task.title}</p>
                             </div>
 
-                            <button
-                              className={`shrink-0 rounded-sm border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] transition-opacity ${STATUS_BADGE_STYLES[normalizedStatus]} ${
-                                pendingAdvanceId === taskId ? 'cursor-wait opacity-65' : 'hover:opacity-80'
-                              }`}
-                              disabled={pendingAdvanceId === taskId}
-                              onClick={event => {
-                                event.stopPropagation();
-                                void onAdvanceTask(task);
-                              }}
-                              type="button"
-                            >
-                              {STATUS_LABELS[normalizedStatus]}
-                            </button>
+                            <div className="flex shrink-0 items-start gap-1.5">
+                              <button
+                                className={`rounded-sm border border-zinc-700 bg-black/25 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-400 transition-colors ${
+                                  pendingDeleteId === taskId
+                                    ? 'cursor-wait opacity-65'
+                                    : 'hover:border-zinc-500 hover:text-zinc-200'
+                                }`}
+                                disabled={pendingDeleteId === taskId || pendingAdvanceId !== null}
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  void onDeleteTask(task);
+                                }}
+                                type="button"
+                              >
+                                Delete
+                              </button>
+
+                              <button
+                                className={`rounded-sm border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] transition-opacity ${STATUS_BADGE_STYLES[normalizedStatus]} ${
+                                  pendingAdvanceId === taskId ? 'cursor-wait opacity-65' : 'hover:opacity-80'
+                                }`}
+                                disabled={pendingAdvanceId === taskId || pendingDeleteId !== null}
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  void onAdvanceTask(task);
+                                }}
+                                type="button"
+                              >
+                                {STATUS_LABELS[normalizedStatus]}
+                              </button>
+                            </div>
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">
                             <span>{toDateLabel(task.createdAt)}</span>
-                            {task.commitHash ? <span>commit {task.commitHash.slice(0, 8)}</span> : null}
+                            {commitHash ? <span>commit {commitHash.slice(0, 8)}</span> : null}
                           </div>
 
                           {isExpanded ? (
-                            <div className="mt-3 border-t border-zinc-800 pt-3">
-                              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
-                                {isAuto ? 'agent.inference' : 'task.context'}
-                              </p>
-                              <p className="mt-2 text-sm leading-6 text-zinc-300">
-                                {task.context || 'No context attached yet.'}
-                              </p>
-                            </div>
+                            <>
+                              {isResolved ? (
+                                <div className="mt-3 border-t border-zinc-800 pt-3">
+                                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                                    resolution.trace
+                                  </p>
+                                  <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.14em] text-zinc-500">
+                                    {resolutionEvent ? <span>{toDateLabel(resolutionEvent.createdAt)}</span> : null}
+                                    {resolutionSource ? <span>{resolutionSource}</span> : null}
+                                    {task.resolutionCommitHash !== UNLINKED_COMMIT ? (
+                                      <span>commit {task.resolutionCommitHash.slice(0, 8)}</span>
+                                    ) : null}
+                                  </div>
+                                  {resolutionContext ? (
+                                    <p className="mt-2 text-sm leading-6 text-zinc-300">{resolutionContext}</p>
+                                  ) : null}
+                                  {resolutionDocumentRefs.length > 0 ? (
+                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                      {resolutionDocumentRefs.map(ref => (
+                                        <span
+                                          className="rounded-sm border border-zinc-700 bg-black/25 px-1.5 py-[3px] font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-400"
+                                          key={ref}
+                                        >
+                                          {ref}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : normalizedStatus === 'done' ? (
+                                <div className="mt-3 border-t border-zinc-800 pt-3">
+                                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                                    resolution.trace
+                                  </p>
+                                  <p className="mt-2 text-sm leading-6 text-zinc-400">
+                                    This task was completed before structured resolution evidence was enabled.
+                                  </p>
+                                </div>
+                              ) : null}
+
+                              <div className="mt-3 border-t border-zinc-800 pt-3">
+                                <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-zinc-500">
+                                  {isAuto ? 'agent.inference' : 'task.context'}
+                                </p>
+                                <p className="mt-2 text-sm leading-6 text-zinc-300">
+                                  {task.context || 'No context attached yet.'}
+                                </p>
+                              </div>
+                            </>
                           ) : null}
                         </article>
                       );

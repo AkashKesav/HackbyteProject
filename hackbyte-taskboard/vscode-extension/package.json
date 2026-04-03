@@ -1,0 +1,112 @@
+{
+  "name": "hackbyte-taskboard-vscode",
+  "displayName": "Hackbyte Taskboard",
+  "description": "Resolve live task-board items from recent commits and documentation using Gemini.",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:hackbyteTaskboard.resolveTasksFromRecentWork",
+    "onCommand:hackbyteTaskboard.configureGeminiKey",
+    "onCommand:hackbyteTaskboard.openLiveTaskBoard"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "hackbyteTaskboard.resolveTasksFromRecentWork",
+        "title": "Hackbyte: Resolve Tasks From Recent Work"
+      },
+      {
+        "command": "hackbyteTaskboard.configureGeminiKey",
+        "title": "Hackbyte: Configure Gemini API Key"
+      },
+      {
+        "command": "hackbyteTaskboard.openLiveTaskBoard",
+        "title": "Hackbyte: Open Live Task Board"
+      }
+    ],
+    "configuration": {
+      "title": "Hackbyte Taskboard",
+      "properties": {
+        "hackbyteTaskboard.spacetimeHttpUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3000",
+          "description": "Base HTTP URL for the SpacetimeDB server."
+        },
+        "hackbyteTaskboard.databaseName": {
+          "type": "string",
+          "default": "hackbyte-taskboard",
+          "description": "SpacetimeDB database name used by the task board."
+        },
+        "hackbyteTaskboard.boardUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:5173/",
+          "description": "Browser URL for the live task board."
+        },
+        "hackbyteTaskboard.geminiModel": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "Gemini model name used for task-resolution matching."
+        },
+        "hackbyteTaskboard.recentCommitCount": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "description": "Number of recent commits to inspect from the current branch."
+        },
+        "hackbyteTaskboard.recentDocLookbackHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "description": "How far back to scan workspace documentation changes."
+        },
+        "hackbyteTaskboard.confidenceThreshold": {
+          "type": "number",
+          "default": 0.76,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Minimum Gemini confidence required before a task-close suggestion is shown."
+        },
+        "hackbyteTaskboard.maxCommitDiffChars": {
+          "type": "number",
+          "default": 1400,
+          "minimum": 200,
+          "description": "Maximum diff-summary characters captured per commit."
+        },
+        "hackbyteTaskboard.maxDocumentExcerptChars": {
+          "type": "number",
+          "default": 2600,
+          "minimum": 400,
+          "description": "Maximum text excerpt captured per recent documentation file."
+        },
+        "hackbyteTaskboard.maxRecentDocs": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "description": "Maximum number of recent documentation files to send to Gemini."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node ./esbuild.mjs",
+    "watch": "node ./esbuild.mjs --watch",
+    "smoke": "esbuild src/testing/smoke.ts --bundle --platform=node --format=cjs --outfile=dist/smoke.cjs && node dist/smoke.cjs"
+  },
+  "dependencies": {
+    "@google/genai": "^1.25.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/vscode": "^1.96.0",
+    "esbuild": "^0.25.11",
+    "typescript": "^5.9.3"
+  }
+}
