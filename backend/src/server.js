@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import morgan from "morgan";
 import { Proxy } from "http-mitm-proxy";
+import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -12,7 +13,7 @@ import {
   createRecentCommitSnapshots,
   summarizeEventForStorage,
 } from "./services/repoContext.js";
-import { getAiDetectorPath, recordCommitInAiDetector } from "./services/aiDetectorStore.js";
+import { getAiDetectorPath, recordCommitInAiDetector, loadAiDetectorState } from "./services/aiDetectorStore.js";
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
 import { buildModelEvidenceReceipt } from "./services/modelEvidence.js";
 import { enrichReceiptWithIntegrations } from "./services/receiptIntegrations.js";
@@ -215,6 +216,56 @@ app.get("/api/dashboard", async (_req, res) => {
   });
 });
 
+app.get("/api/ai-stats", async (_req, res) => {
+  try {
+    const aiDetectorPath = getAiDetectorPath(projectRoot);
+    const aiDetectorState = await loadAiDetectorState(aiDetectorPath);
+    
+    // Calculate per-file AI percentages
+    const fileStats = [];
+    const files = aiDetectorState.files || {};
+    
+    for (const [filePath, fileState] of Object.entries(files)) {
+      const totalLines = fileState.totalLines || 0;
+      const aiLines = fileState.aiLines || 0;
+      const aiPercentage = totalLines > 0 ? Math.round((aiLines / totalLines) * 100) : 0;
+      
+      fileStats.push({
+        path: filePath,
+        totalLines,
+        aiLines,
+        aiPercentage,
+        lastUpdated: fileState.lastUpdated || null,
+      });
+    }
+    
+    // Sort by AI percentage descending
+    fileStats.sort((a, b) => b.aiPercentage - a.aiPercentage);
+    
+    // Calculate overall stats
+    const totalProjectLines = fileStats.reduce((sum, f) => sum + f.totalLines, 0);
+    const totalAiLines = fileStats.reduce((sum, f) => sum + f.aiLines, 0);
+    const overallAiPercentage = totalProjectLines > 0 ? Math.round((totalAiLines / totalProjectLines) * 100) : 0;
+    
+    res.json({
+      ok: true,
+      overall: {
+        totalLines: totalProjectLines,
+        aiLines: totalAiLines,
+        aiPercentage: overallAiPercentage,
+      },
+      files: fileStats.slice(0, 20), // Top 20 files
+      fileCount: fileStats.length,
+    });
+  } catch (error) {
+    console.error("Failed to load AI stats:", error);
+    res.status(500).json({
+      ok: false,
+      error: "Failed to load AI detection statistics",
+    });
+  }
+});
+
 app.get("/api/proxy/events", (_req, res) => {
   res.json({
     ok: true,
@@ -305,10 +356,12 @@ app.post("/api/extension/events", async (req, res) => {
 });
 
 app.post("/api/receipt", async (req, res) => {
+  const commitWindow = buildCommitReceiptWindow(req.body?.commitHash);
   const receipt = await buildModelEvidenceReceipt({
     ...(req.body ?? {}),
     aiDetectorPath: getAiDetectorPath(projectRoot),
     captureLog: state.captures,
+    commitWindow,
   });
   const enrichedReceipt = await enrichReceiptWithIntegrations(projectRoot, receipt, {
     filePaths: normalizeReceiptFilePaths(req.body?.filePaths, req.body?.targetPath),
@@ -317,6 +370,7 @@ app.post("/api/receipt", async (req, res) => {
     ...enrichedReceipt,
     updatedAt: new Date().toISOString(),
     commitHash: req.body?.commitHash || null,
+    commitWindow: enrichedReceipt.commitWindow || commitWindow || null,
   };
   state.receiptHistory = upsertReceiptHistory(state.receiptHistory, state.latestReceipt);
   await persistReceipt(state.latestReceipt);
@@ -598,6 +652,7 @@ async function buildRecentCommitFeed() {
     const receipt = matchReceiptToCommit(commit);
     const contribution = receipt?.modelEvidence?.contribution ?? null;
     const copilot = receipt?.copilotContribution ?? receipt?.modelEvidence?.copilotContribution ?? null;
+    const commitWindow = receipt?.commitWindow ?? null;
 
     return {
       ...commit,
@@ -609,14 +664,17 @@ async function buildRecentCommitFeed() {
             certainty: receipt?.modelEvidence?.certainty ?? "UNKNOWN",
             method: receipt?.modelEvidence?.method ?? null,
             updatedAt: receipt?.updatedAt ?? null,
+            logEventCount: copilot?.eventCount ?? 0,
           }
         : null,
       copilot: copilot
         ? {
             estimatedAiPercentage: copilot.estimatedAiPercentage,
+            eventCount: copilot.eventCount ?? 0,
           }
         : null,
-      };
+      commitWindow,
+    };
   });
 }
 
@@ -786,6 +844,54 @@ function commitHashesMatch(left, right) {
 
 function normalizeCommitHash(value) {
   return String(value || "").trim().toLowerCase();
+}
+
+function buildCommitReceiptWindow(commitHash) {
+  const normalizedCommitHash = normalizeCommitHash(commitHash);
+  if (!normalizedCommitHash) {
+    return null;
+  }
+
+  try {
+    const currentCommitAt = readGitCommitTimestamp(normalizedCommitHash);
+    const previousCommitHash = readGitFirstParentHash(normalizedCommitHash);
+    const previousCommitAt = previousCommitHash ? readGitCommitTimestamp(previousCommitHash) : null;
+
+    if (!currentCommitAt && !previousCommitAt) {
+      return null;
+    }
+
+    return {
+      source: "git-history",
+      commitHash: normalizedCommitHash,
+      previousCommitHash,
+      startedAt: previousCommitAt,
+      endedAt: currentCommitAt,
+    };
+  } catch (error) {
+    console.warn(`Failed to build commit window for ${normalizedCommitHash}`, error?.message || error);
+    return null;
+  }
+}
+
+function readGitCommitTimestamp(commitHash) {
+  const output = execGit(["show", "-s", "--format=%cI", commitHash]).trim();
+  return output || null;
+}
+
+function readGitFirstParentHash(commitHash) {
+  const parents = execGit(["show", "-s", "--format=%P", commitHash])
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return parents[0] || null;
+}
+
+function execGit(args) {
+  return execFileSync("git", args, {
+    cwd: projectRoot,
+    encoding: "utf8",
+  });
 }
 
 function cleanupGithubStates() {

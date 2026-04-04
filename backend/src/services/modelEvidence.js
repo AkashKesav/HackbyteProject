@@ -22,26 +22,39 @@ export async function buildModelEvidenceReceipt(payload = {}) {
     loadAiDetectorState(payload.aiDetectorPath),
   ]);
   const captureLog = normalizeCaptureLog(payload.captureLog);
-
   const mode = isPreviewReceipt(payload.receiptUrl) ? "preview" : "commit";
+  const commitWindow = normalizeCommitWindow(payload.commitWindow);
+  const scopedVsCodeLog = filterRecentEntries(vsCodeLog, mode, commitWindow);
+  const scopedFirefoxLog = filterRecentEntries(firefoxLog, mode, commitWindow);
+  const scopedCaptureLog = filterRecentCaptures(captureLog, mode, commitWindow);
   const diffText = buildDiffText(payload);
   const diffAnalysis = analyzeDiff(diffText);
-  const evidence = correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, aiDetectorState);
-  const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis, mode, aiDetectorState);
+  const copilotContribution = buildCopilotContribution(scopedVsCodeLog, diffAnalysis, mode, aiDetectorState);
+  const evidence = correlateLogs(
+    scopedVsCodeLog,
+    scopedFirefoxLog,
+    scopedCaptureLog,
+    diffAnalysis,
+    mode,
+    aiDetectorState,
+    commitWindow,
+    copilotContribution.eventCount
+  );
 
   return {
     receiptUrl: payload.receiptUrl || null,
+    commitWindow,
     logPaths: {
       vscodeLogPath,
       firefoxLogPath,
     },
     counts: {
-      vsCodeEntries: vsCodeLog.length,
-      firefoxEntries: firefoxLog.length,
+      vsCodeEntries: scopedVsCodeLog.length,
+      firefoxEntries: scopedFirefoxLog.length,
       diffHashes: diffAnalysis.hashes.size,
       totalChangedLines: diffAnalysis.totalChangedLines,
       meaningfulChangedLines: diffAnalysis.meaningfulChangedLines.length,
-      captureEntries: captureLog.length,
+      captureEntries: scopedCaptureLog.length,
       taggedFiles: Object.keys(aiDetectorState.files || {}).length,
       taggedCommits: Array.isArray(aiDetectorState.commits) ? aiDetectorState.commits.length : 0,
     },
@@ -149,10 +162,10 @@ function analyzeDiff(diffText) {
   };
 }
 
-function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, aiDetectorState) {
-  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
-  const recentFirefoxLog = filterRecentEntries(firefoxLog, mode);
-  const recentCaptureLog = filterRecentCaptures(captureLog, mode);
+function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, aiDetectorState, commitWindow = null, copilotEventCount = 0) {
+  const recentVsCodeLog = Array.isArray(vsCodeLog) ? vsCodeLog : [];
+  const recentFirefoxLog = Array.isArray(firefoxLog) ? firefoxLog : [];
+  const recentCaptureLog = Array.isArray(captureLog) ? captureLog : [];
   const firefoxCopies = recentFirefoxLog.filter((entry) => entry.eventType === "copy" || entry.type === "copy");
   const vscodePastes = recentVsCodeLog.filter(
     (entry) => entry.eventType === "paste-event" || entry.source === "paste-event" || entry.label === "paste-detected"
@@ -187,6 +200,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
   const tagEvidence = buildTagEvidenceLines(taggedCoverage);
   const copilotTagEvidence = buildTagEvidenceLines(taggedCopilotCoverage);
   const resolvedModel = resolveEvidenceModel(modelQueries, recentCaptureLog);
+  const commitWindowEvidence = buildCommitWindowEvidenceLines(commitWindow, copilotEventCount);
 
   for (const copy of firefoxCopies) {
     const matchingPaste = vscodePastes.find((paste) => {
@@ -207,6 +221,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
         contribution: buildContributionSummary(combinedCoverage, "HIGH", mode),
         copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
         evidence: [
+          ...commitWindowEvidence,
           `Firefox copy at ${copy.ts} from ${copy.provider || "unknown"}`,
           `VS Code paste at ${matchingPaste.ts} into ${matchingPaste.documentPath || "unknown"}`,
           `Matching content hash ${copy.contentHash}`,
@@ -226,6 +241,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
         contribution: buildContributionSummary(combinedCoverage, "HIGH", mode),
         copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
         evidence: [
+          ...commitWindowEvidence,
           `Firefox copy at ${copy.ts} from ${copy.provider || "unknown"}`,
           `Copied content hash appears in commit diff`,
           `Matching content hash ${copy.contentHash}`,
@@ -249,6 +265,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
         contribution: buildContributionSummary(combinedCoverage, "MEDIUM", mode),
         copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
         evidence: [
+          ...commitWindowEvidence,
           `Firefox copy at ${copy.ts}`,
           `VS Code ${nearbySuggestion.source || nearbySuggestion.eventType} at ${nearbySuggestion.ts}`,
           `Time delta ${Math.abs(Date.parse(nearbySuggestion.ts) - Date.parse(copy.ts))}ms`,
@@ -296,6 +313,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
         mode
       ),
       evidence: [
+        ...commitWindowEvidence,
         ...buildModelEvidenceLines(recentCaptureLog, resolvedModel),
         ...(copilotCoverage.aiMatchedLines > 0
           ? [
@@ -336,7 +354,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
         taggedCopilotCoverage.exactMatchedLines > 0 || taggedCopilotCoverage.structuralMatchedLines > 0 ? "MEDIUM" : "LOW",
         mode
       ),
-      evidence: [...buildModelEvidenceLines(recentCaptureLog, resolvedModel), ...tagEvidence],
+      evidence: [...commitWindowEvidence, ...buildModelEvidenceLines(recentCaptureLog, resolvedModel), ...tagEvidence],
     };
   }
 
@@ -347,7 +365,7 @@ function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, ai
     model: resolvedModel,
     contribution: buildContributionSummary(combinedCoverage, "LOW", mode),
     copilotContribution: buildContributionSummary(combinedCopilotCoverage, "LOW", mode),
-    evidence: buildModelEvidenceLines(recentCaptureLog, resolvedModel),
+    evidence: [...commitWindowEvidence, ...buildModelEvidenceLines(recentCaptureLog, resolvedModel)],
   };
 }
 
@@ -482,7 +500,7 @@ function buildContributionSummary(coverage, confidenceLevel, mode) {
 }
 
 function buildCopilotContribution(vsCodeLog, diffAnalysis, mode, aiDetectorState) {
-  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
+  const recentVsCodeLog = Array.isArray(vsCodeLog) ? vsCodeLog : [];
   const copilotEntries = recentVsCodeLog.filter((entry) => {
     const provider = String(entry.provider || "").toLowerCase();
     const tool = String(entry.tool || "");
@@ -605,28 +623,106 @@ function isMeaningfulLine(line) {
   return true;
 }
 
-function filterRecentEntries(entries, mode) {
+function filterRecentEntries(entries, mode, commitWindow = null) {
+  const sourceEntries = Array.isArray(entries) ? entries : [];
+  if (commitWindow) {
+    return sourceEntries.filter((entry) => isTimestampWithinCommitWindow(entry?.ts || entry?.timeStamp, commitWindow));
+  }
+
   if (mode !== "preview") {
-    return entries;
+    return sourceEntries;
   }
 
   const cutoff = Date.now() - PREVIEW_EVENT_WINDOW_MS;
-  return entries.filter((entry) => {
+  return sourceEntries.filter((entry) => {
     const ts = Date.parse(entry.ts || 0);
     return !Number.isNaN(ts) && ts >= cutoff;
   });
 }
 
-function filterRecentCaptures(entries, mode) {
+function filterRecentCaptures(entries, mode, commitWindow = null) {
+  const sourceEntries = Array.isArray(entries) ? entries : [];
+  if (commitWindow) {
+    return sourceEntries.filter((entry) => isTimestampWithinCommitWindow(entry?.capturedAt || entry?.ts, commitWindow));
+  }
+
   if (mode !== "preview") {
-    return entries;
+    return sourceEntries;
   }
 
   const cutoff = Date.now() - PREVIEW_EVENT_WINDOW_MS;
-  return entries.filter((entry) => {
+  return sourceEntries.filter((entry) => {
     const ts = Date.parse(entry?.capturedAt || entry?.ts || 0);
     return !Number.isNaN(ts) && ts >= cutoff;
   });
+}
+
+function normalizeCommitWindow(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const startedAt = normalizeWindowTimestamp(value.startedAt);
+  const endedAt = normalizeWindowTimestamp(value.endedAt);
+  if (!startedAt && !endedAt) {
+    return null;
+  }
+
+  return {
+    source: String(value.source || "git-history"),
+    commitHash: String(value.commitHash || "").trim().toLowerCase() || null,
+    previousCommitHash: String(value.previousCommitHash || "").trim().toLowerCase() || null,
+    startedAt,
+    endedAt,
+  };
+}
+
+function normalizeWindowTimestamp(value) {
+  const timestamp = Date.parse(value || 0);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  return new Date(timestamp).toISOString();
+}
+
+function isTimestampWithinCommitWindow(value, commitWindow) {
+  const timestamp = Date.parse(value || 0);
+  if (Number.isNaN(timestamp)) {
+    return false;
+  }
+
+  const start = Date.parse(commitWindow?.startedAt || 0);
+  const end = Date.parse(commitWindow?.endedAt || 0);
+
+  if (!Number.isNaN(start) && timestamp < start) {
+    return false;
+  }
+
+  if (!Number.isNaN(end) && timestamp > end) {
+    return false;
+  }
+
+  return true;
+}
+
+function buildCommitWindowEvidenceLines(commitWindow, copilotEventCount = 0) {
+  if (!commitWindow) {
+    return [];
+  }
+
+  const startLabel = commitWindow.startedAt || "repository start";
+  const endLabel = commitWindow.endedAt || "commit time unavailable";
+  const windowLabel = `Commit window ${startLabel} -> ${endLabel}`;
+  const hashLabel = commitWindow.previousCommitHash
+    ? `Scoped Hackbyte Code Narrator logs from ${commitWindow.previousCommitHash.slice(0, 7)} to ${commitWindow.commitHash?.slice(0, 7) || "current"}`
+    : `Scoped Hackbyte Code Narrator logs up to ${commitWindow.commitHash?.slice(0, 7) || "current"}`;
+
+  return [
+    hashLabel,
+    windowLabel,
+    `Found ${copilotEventCount} AI log events in this commit window`,
+  ];
 }
 
 function isExplicitTool(tool) {

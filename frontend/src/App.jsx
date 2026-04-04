@@ -4,6 +4,7 @@ const API_BASE = "http://localhost:4000";
 
 export default function App() {
   const [dashboard, setDashboard] = useState(null);
+  const [aiStats, setAiStats] = useState(null);
   const [connecting, setConnecting] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [githubMessage, setGithubMessage] = useState("");
@@ -16,13 +17,33 @@ export default function App() {
     setDashboard(data);
   }
 
+  async function loadAiStats() {
+    try {
+      const response = await fetch(`${API_BASE}/api/ai-stats`);
+      const data = await response.json();
+      if (data.ok) {
+        setAiStats(data);
+      }
+    } catch (error) {
+      console.error("Failed to load AI stats:", error);
+    }
+  }
+
   useEffect(() => {
     void loadDashboard();
-    const interval = window.setInterval(() => void loadDashboard(), 2000);
-    const refreshOnFocus = () => void loadDashboard();
+    void loadAiStats();
+    const interval = window.setInterval(() => {
+      void loadDashboard();
+      void loadAiStats();
+    }, 2000);
+    const refreshOnFocus = () => {
+      void loadDashboard();
+      void loadAiStats();
+    };
     const refreshOnVisible = () => {
       if (document.visibilityState === "visible") {
         void loadDashboard();
+        void loadAiStats();
       }
     };
 
@@ -148,7 +169,8 @@ export default function App() {
             <SidebarItem active={recentCommits.length > 0}>Commit history</SidebarItem>
           </SidebarSection>
           <SidebarSection title="Summary">
-            <SidebarMetric label="AI %" value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"} />
+            <SidebarMetric label="Project AI %" value={aiStats?.overall?.aiPercentage ? `${aiStats.overall.aiPercentage}%` : "--"} />
+            <SidebarMetric label="Commit AI %" value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"} />
             <SidebarMetric label="Copilot %" value={receiptCopilot ? `${receiptCopilot.estimatedAiPercentage}%` : "--"} />
             <SidebarMetric label="CVEs" value={dependencyAudit ? String(dependencyAudit.findingCount || 0) : "--"} />
             <SidebarMetric label="Events" value={String(dashboard.proxy.totalEvents || 0)} />
@@ -205,7 +227,13 @@ export default function App() {
             </div>
           </section>
 
-          <section className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <section className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <StatCard
+              label="Project AI %"
+              value={aiStats?.overall?.aiPercentage ? `${aiStats.overall.aiPercentage}%` : "--"}
+              sub={aiStats?.overall?.aiLines ? `${aiStats.overall.aiLines}/${aiStats.overall.totalLines} lines` : "analyzing"}
+              tone={scoreTone(aiStats?.overall?.aiPercentage ?? 0)}
+            />
             <StatCard
               label="Commit score"
               value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"}
@@ -272,6 +300,9 @@ export default function App() {
                           <MiniChip tone="gry">
                             {commit.ai ? `${commit.ai.aiMatchedLines}/${commit.ai.totalChangedLines} matched` : "no diff score"}
                           </MiniChip>
+                          {commit.copilot ? (
+                            <MiniChip tone="pur">{`${commit.copilot.eventCount || 0} AI log events`}</MiniChip>
+                          ) : null}
                         </div>
                       </div>
                       <CellValue value={commit.ai ? `${commit.ai.estimatedAiPercentage}%` : "--"} tone={scoreTone(commit.ai?.estimatedAiPercentage ?? 0)} />
@@ -292,7 +323,12 @@ export default function App() {
                     <MetricRow label="Authored" value={formatDateTime(dashboard.latestCommit?.authoredAt)} />
                     <MetricRow label="AI usage" value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"} />
                     <MetricRow label="Copilot usage" value={receiptCopilot ? `${receiptCopilot.estimatedAiPercentage}%` : "--"} />
+                    <MetricRow
+                      label="Commit-window AI events"
+                      value={receiptCopilot ? String(receiptCopilot.eventCount || 0) : "--"}
+                    />
                     <MetricRow label="Model" value={receiptModel} />
+                    <MetricRow label="Commit window" value={formatCommitWindow(latestReceipt?.commitWindow)} />
                     <MetricRow
                       label="Matched lines"
                       value={receiptContribution ? `${receiptContribution.aiMatchedLines}/${receiptContribution.totalChangedLines}` : "0/0"}
@@ -450,6 +486,28 @@ export default function App() {
                 <MetricRow label="Critical findings" value={String(countSeverity(dashboard.analytics.vulnerabilities, "critical"))} />
                 <MetricRow label="High findings" value={String(countSeverity(dashboard.analytics.vulnerabilities, "high"))} />
                 <MetricRow label="Medium findings" value={String(countSeverity(dashboard.analytics.vulnerabilities, "medium"))} />
+              </Panel>
+
+              <Panel title="Top AI-detected files" subtitle="Files with highest AI generation percentage from code narrator.">
+                {!aiStats || aiStats.files.length === 0 ? (
+                  <EmptyState text="No AI-detected files available yet." compact />
+                ) : (
+                  <div className="space-y-2">
+                    {aiStats.files.slice(0, 8).map((file) => (
+                      <div key={file.path} className="flex items-center justify-between rounded-xl border border-[#252c3e] bg-[#11141c] px-4 py-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-mono text-[#edf0fa]">{file.path}</div>
+                          <div className="mt-1 text-xs text-[#8492b4]">{file.aiLines} / {file.totalLines} lines</div>
+                        </div>
+                        <div className="ml-3 shrink-0">
+                          <div className="rounded-full bg-[#1fc86b] px-3 py-1 font-mono text-sm font-bold text-[#0b0d12]">
+                            {file.aiPercentage}%
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </Panel>
 
               <Panel title="Contributors" subtitle="Activity grouped by detected author.">
@@ -737,6 +795,16 @@ function formatDateTime(value) {
   }
 
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+}
+
+function formatCommitWindow(commitWindow) {
+  if (!commitWindow) {
+    return "not scoped";
+  }
+
+  const startLabel = commitWindow.startedAt ? formatDateTime(commitWindow.startedAt) : "repo start";
+  const endLabel = commitWindow.endedAt ? formatDateTime(commitWindow.endedAt) : "unknown";
+  return `${startLabel} -> ${endLabel}`;
 }
 
 function countSeverity(items, severity) {
