@@ -3,11 +3,13 @@ import cors from "cors";
 import morgan from "morgan";
 import { Proxy } from "http-mitm-proxy";
 import { promises as fs } from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildRepoContext,
   createLatestCommitSnapshot,
+  createRecentCommitSnapshots,
   summarizeEventForStorage,
 } from "./services/repoContext.js";
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
@@ -19,12 +21,24 @@ const projectRoot = path.resolve(__dirname, "../..");
 const dataDir = path.resolve(projectRoot, "backend/data");
 const eventLogPath = path.join(dataDir, "proxy-events.json");
 const receiptLogPath = path.join(dataDir, "latest-receipt.json");
+const githubSessionPath = path.join(dataDir, "github-session.json");
 const mitmCaDir = path.join(dataDir, ".http-mitm-proxy");
 const PORT = Number(process.env.PORT || 4000);
 const SIM_PROXY_PORT = Number(process.env.SIM_PROXY_PORT || 8877);
 const REAL_PROXY_PORT = Number(process.env.REAL_PROXY_PORT || 8877);
 const ENABLE_LOCAL_PROXY = process.env.ENABLE_LOCAL_PROXY === "true";
 const REPO_CONTEXT_REFRESH_MS = 60 * 1000;
+let FRONTEND_URL = "http://localhost:5173";
+let GITHUB_CLIENT_ID = "";
+let GITHUB_CLIENT_SECRET = "";
+let GITHUB_OAUTH_CALLBACK_URL = `http://localhost:${PORT}/api/github/callback`;
+const GITHUB_STATE_TTL_MS = 10 * 60 * 1000;
+
+await loadEnvFiles();
+FRONTEND_URL = process.env.FRONTEND_URL || FRONTEND_URL;
+GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
+GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
+GITHUB_OAUTH_CALLBACK_URL = process.env.GITHUB_OAUTH_CALLBACK_URL || GITHUB_OAUTH_CALLBACK_URL;
 
 const app = express();
 app.use(cors());
@@ -46,8 +60,11 @@ const state = {
   repoContext: await buildRepoContext(projectRoot),
   repoContextUpdatedAt: Date.now(),
   latestCommit: await createLatestCommitSnapshot(projectRoot),
+  recentCommits: await createRecentCommitSnapshots(projectRoot, 12),
   captures: await loadStoredCaptures(),
   latestReceipt: await loadStoredReceipt(),
+  github: await loadGithubSession(),
+  githubStates: new Map(),
 };
 
 state.proxy.totalEvents = state.captures.length;
@@ -57,6 +74,7 @@ state.proxy.healthy = state.captures.length > 0;
 app.get("/api/health", async (_req, res) => {
   await refreshRepoContextIfNeeded(true);
   state.latestCommit = await createLatestCommitSnapshot(projectRoot);
+  state.recentCommits = await buildRecentCommitFeed();
   state.proxy.lastHealthCheckAt = new Date().toISOString();
 
   res.json({
@@ -80,7 +98,9 @@ app.get("/api/health", async (_req, res) => {
     },
     repo: state.repoContext.summary,
     latestCommit: state.latestCommit,
+    recentCommits: state.recentCommits,
     latestReceipt: state.latestReceipt,
+    github: buildGithubStatus(),
     captureCount: state.captures.length,
   });
 });
@@ -88,6 +108,7 @@ app.get("/api/health", async (_req, res) => {
 app.get("/api/proxy/status", async (_req, res) => {
   await refreshRepoContextIfNeeded(true);
   state.latestCommit = await createLatestCommitSnapshot(projectRoot);
+  state.recentCommits = await buildRecentCommitFeed();
 
   res.json({
     proxy: state.proxy,
@@ -108,7 +129,9 @@ app.get("/api/proxy/status", async (_req, res) => {
     },
     repo: state.repoContext.summary,
     latestCommit: state.latestCommit,
+    recentCommits: state.recentCommits,
     latestReceipt: state.latestReceipt,
+    github: buildGithubStatus(),
     captures: state.captures,
     analytics: {
       contributors: buildContributorSummary(state.captures),
@@ -156,12 +179,15 @@ app.all("/proxy/:provider/*", async (req, res) => {
 app.get("/api/dashboard", async (_req, res) => {
   await refreshRepoContextIfNeeded(true);
   state.latestCommit = await createLatestCommitSnapshot(projectRoot);
+  state.recentCommits = await buildRecentCommitFeed();
 
   res.json({
     proxy: state.proxy,
     repo: state.repoContext.summary,
     latestCommit: state.latestCommit,
+    recentCommits: state.recentCommits,
     latestReceipt: state.latestReceipt,
+    github: buildGithubStatus(),
     captures: state.captures,
     analytics: {
       contributors: buildContributorSummary(state.captures),
@@ -280,12 +306,123 @@ app.post("/api/receipt", async (req, res) => {
   });
 });
 
-app.post("/api/github/connect", (_req, res) => {
+app.get("/api/github/status", (_req, res) => {
   res.json({
     ok: true,
-    connected: true,
-    note: "GitHub OAuth is scaffolded as UI only in this first milestone.",
+    github: buildGithubStatus(),
   });
+});
+
+app.post("/api/github/connect", (_req, res) => {
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    return res.status(400).json({
+      ok: false,
+      configured: false,
+      message: "GitHub OAuth is not configured. Add GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET to .env.",
+    });
+  }
+
+  const stateToken = crypto.randomBytes(24).toString("hex");
+  cleanupGithubStates();
+  state.githubStates.set(stateToken, Date.now() + GITHUB_STATE_TTL_MS);
+
+  const authorizationUrl = new URL("https://github.com/login/oauth/authorize");
+  authorizationUrl.searchParams.set("client_id", GITHUB_CLIENT_ID);
+  authorizationUrl.searchParams.set("redirect_uri", GITHUB_OAUTH_CALLBACK_URL);
+  authorizationUrl.searchParams.set("scope", "read:user user:email repo");
+  authorizationUrl.searchParams.set("state", stateToken);
+
+  res.json({
+    ok: true,
+    configured: true,
+    authorizationUrl: authorizationUrl.toString(),
+  });
+});
+
+app.get("/api/github/callback", async (req, res) => {
+  const { code, state: stateToken } = req.query;
+  cleanupGithubStates();
+  const hasState = typeof stateToken === "string" && state.githubStates.has(stateToken);
+
+  if (!code || !stateToken || !hasState) {
+    return res.redirect(`${FRONTEND_URL}?github=error&reason=state`);
+  }
+  state.githubStates.delete(stateToken);
+
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    return res.redirect(`${FRONTEND_URL}?github=error&reason=config`);
+  }
+
+  try {
+    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        client_secret: GITHUB_CLIENT_SECRET,
+        code,
+        redirect_uri: GITHUB_OAUTH_CALLBACK_URL,
+        state: stateToken,
+      }),
+    });
+
+    const tokenPayload = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+      throw new Error(tokenPayload.error_description || `GitHub token exchange failed with ${tokenResponse.status}`);
+    }
+
+    const [userResponse, emailResponse] = await Promise.all([
+      fetch("https://api.github.com/user", {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${tokenPayload.access_token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      }),
+      fetch("https://api.github.com/user/emails", {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${tokenPayload.access_token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      }),
+    ]);
+
+    const user = await userResponse.json();
+    const emails = emailResponse.ok ? await emailResponse.json() : [];
+    const primaryEmail = Array.isArray(emails)
+      ? emails.find((item) => item.primary)?.email || emails[0]?.email || null
+      : null;
+
+    state.github = {
+      connectedAt: new Date().toISOString(),
+      accessToken: tokenPayload.access_token,
+      scope: tokenPayload.scope || null,
+      tokenType: tokenPayload.token_type || "bearer",
+      user: {
+        login: user.login || null,
+        name: user.name || user.login || null,
+        avatarUrl: user.avatar_url || null,
+        profileUrl: user.html_url || null,
+        email: primaryEmail,
+      },
+    };
+    await persistGithubSession(state.github);
+    return res.redirect(`${FRONTEND_URL}/?github=connected`);
+  } catch (error) {
+    return res.redirect(
+      `${FRONTEND_URL}/?github=error&reason=${encodeURIComponent(error?.message || String(error))}`
+    );
+  }
+});
+
+app.post("/api/github/logout", async (_req, res) => {
+  state.github = null;
+  await persistGithubSession(null);
+  res.json({ ok: true });
 });
 
 app.listen(PORT, () => {
@@ -341,6 +478,24 @@ async function persistReceipt(receipt) {
   await fs.writeFile(receiptLogPath, JSON.stringify(receipt, null, 2));
 }
 
+async function loadGithubSession() {
+  try {
+    const raw = await fs.readFile(githubSessionPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    console.warn("Failed to load GitHub session", error);
+    return null;
+  }
+}
+
+async function persistGithubSession(session) {
+  await fs.writeFile(githubSessionPath, JSON.stringify(session, null, 2));
+}
+
 async function captureProxyEvent(input, source) {
   await refreshRepoContextIfNeeded();
   const analysis = analyzeProxyEvent(input, state.repoContext);
@@ -371,6 +526,37 @@ async function refreshRepoContextIfNeeded(force = false) {
   }
 }
 
+async function buildRecentCommitFeed() {
+  const localCommits = await createRecentCommitSnapshots(projectRoot, 12);
+  const githubCommits = await fetchGithubRepoCommits(12);
+  const sourceCommits = githubCommits.length > 0 ? githubCommits : localCommits;
+
+  return sourceCommits.map((commit) => {
+    const receipt = matchReceiptToCommit(commit);
+    const contribution = receipt?.modelEvidence?.contribution ?? null;
+    const copilot = receipt?.copilotContribution ?? receipt?.modelEvidence?.copilotContribution ?? null;
+
+    return {
+      ...commit,
+      ai: contribution
+        ? {
+            estimatedAiPercentage: contribution.estimatedAiPercentage,
+            aiMatchedLines: contribution.aiMatchedLines,
+            totalChangedLines: contribution.totalChangedLines,
+            certainty: receipt?.modelEvidence?.certainty ?? "UNKNOWN",
+            method: receipt?.modelEvidence?.method ?? null,
+            updatedAt: receipt?.updatedAt ?? null,
+          }
+        : null,
+      copilot: copilot
+        ? {
+            estimatedAiPercentage: copilot.estimatedAiPercentage,
+          }
+        : null,
+    };
+  });
+}
+
 function mapProviderToHost(provider) {
   const map = {
     openai: "api.openai.com",
@@ -381,6 +567,125 @@ function mapProviderToHost(provider) {
   };
 
   return map[provider] || null;
+}
+
+function buildGithubStatus() {
+  if (!state.github?.user) {
+    return {
+      configured: Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET),
+      connected: false,
+      user: null,
+      connectedAt: null,
+    };
+  }
+
+  return {
+    configured: Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET),
+    connected: true,
+    user: state.github.user,
+    connectedAt: state.github.connectedAt || null,
+  };
+}
+
+async function fetchGithubRepoCommits(limit = 12) {
+  if (!state.github?.accessToken || !state.repoContext.summary.fullName) {
+    return [];
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${state.repoContext.summary.fullName}/commits?per_page=${Math.max(1, limit)}`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${state.github.accessToken}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const commits = await response.json();
+    if (!Array.isArray(commits)) {
+      return [];
+    }
+
+    return commits.map((entry) => ({
+      hash: entry.sha || null,
+      shortHash: entry.sha?.slice(0, 7) ?? null,
+      authorName: entry.commit?.author?.name || entry.author?.login || null,
+      authorEmail: entry.commit?.author?.email || null,
+      subject: entry.commit?.message?.split("\n")[0] || "Untitled commit",
+      authoredAt: entry.commit?.author?.date || null,
+      classification: "unknown",
+      note: "GitHub commit synced from the connected repository.",
+      htmlUrl: entry.html_url || null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function matchReceiptToCommit(commit) {
+  if (!state.latestReceipt || !commit?.hash) {
+    return null;
+  }
+
+  const receiptHash = String(state.latestReceipt.commitHash || "").toLowerCase();
+  const commitHash = String(commit.hash || "").toLowerCase();
+  if (!receiptHash || !commitHash) {
+    return null;
+  }
+
+  return commitHash === receiptHash || commitHash.startsWith(receiptHash) || receiptHash.startsWith(commitHash)
+    ? state.latestReceipt
+    : null;
+}
+
+function cleanupGithubStates() {
+  const now = Date.now();
+  for (const [token, expiresAt] of state.githubStates.entries()) {
+    if (expiresAt <= now) {
+      state.githubStates.delete(token);
+    }
+  }
+}
+
+async function loadEnvFiles() {
+  const envFiles = [
+    path.resolve(projectRoot, ".env"),
+    path.resolve(projectRoot, ".env.local"),
+    path.resolve(projectRoot, "backend", ".env"),
+    path.resolve(projectRoot, "backend", ".env.local"),
+  ];
+
+  for (const filePath of envFiles) {
+    try {
+      const content = await fs.readFile(filePath, "utf8");
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) {
+          continue;
+        }
+        const separator = line.indexOf("=");
+        if (separator === -1) {
+          continue;
+        }
+        const key = line.slice(0, separator).trim();
+        const value = line.slice(separator + 1).trim();
+        if (!(key in process.env)) {
+          process.env[key] = value;
+        }
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        console.warn(`Failed to load env file ${filePath}`, error);
+      }
+    }
+  }
 }
 
 function normalizeProxyAuthor(req) {

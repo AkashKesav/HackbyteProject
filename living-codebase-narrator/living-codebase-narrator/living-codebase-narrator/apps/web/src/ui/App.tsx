@@ -39,16 +39,6 @@ export function App() {
     return `${latest.filePath} - ${latest.summary}`;
   }, [latest]);
 
-  function speakLatestDoc() {
-    if (!latest) return;
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-    const utterance = new SpeechSynthesisUtterance(latest.summary);
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-  }
-
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -83,10 +73,7 @@ export function App() {
       void audio.play().catch(() => {
         // autoplay may be blocked; ignore
       });
-      return;
     }
-
-    speakLatestDoc();
   }, [latest]);
 
   return (
@@ -101,7 +88,6 @@ export function App() {
           <div className="pill">Gemini: {health?.integrations.gemini.configured ? 'on' : 'off'}</div>
           <div className="pill">HF: {health?.integrations.huggingface.configured ? 'on' : 'off'}</div>
           <div className="pill">ElevenLabs: {health?.integrations.elevenlabs.configured ? 'on' : 'off'}</div>
-          <div className="pill">Browser Voice: {'speechSynthesis' in window ? 'on' : 'off'}</div>
           <div className="pill">
             Mongo: {health?.integrations.mongodb.configured ? (health.integrations.mongodb.connected ? 'on' : 'down') : 'off'}
           </div>
@@ -113,11 +99,6 @@ export function App() {
         <section className="panel">
           <div className="panelTitle">Live feed</div>
           <div className="panelSubtitle">{title}</div>
-          <div className="audioRow" style={{ padding: '0 0 12px 0' }}>
-            <button type="button" className="chip" onClick={speakLatestDoc} disabled={!latest}>
-              Speak latest
-            </button>
-          </div>
           <div className="cards">
             {docs.map((d) => (
               <article key={d.id} className="card">
@@ -160,7 +141,7 @@ export function App() {
                   </div>
                 ) : (
                   <div className="audioRow">
-                    <span className="chip">Browser voice fallback</span>
+                    <span className="chip">ElevenLabs audio unavailable</span>
                   </div>
                 )}
                 <div className="voteRow" style={{ marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' }}>

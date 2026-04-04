@@ -50,6 +50,39 @@ export async function createLatestCommitSnapshot(projectRoot) {
   }
 }
 
+export async function createRecentCommitSnapshots(projectRoot, limit = 10) {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      [
+        "log",
+        `-${Math.max(1, limit)}`,
+        "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%s%x1f%ai",
+      ],
+      { cwd: projectRoot }
+    );
+
+    return stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [hash, shortHash, authorName, authorEmail, subject, authoredAt] = line.split("\u001f");
+        return {
+          hash,
+          shortHash,
+          authorName,
+          authorEmail,
+          subject,
+          authoredAt,
+          classification: "unknown",
+          note: "Classification becomes meaningful once proxy events are matched to commits.",
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 export function summarizeEventForStorage(event, analysis) {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,

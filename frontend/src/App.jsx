@@ -6,6 +6,7 @@ export default function App() {
   const [dashboard, setDashboard] = useState(null);
   const [connecting, setConnecting] = useState(false);
   const [simulating, setSimulating] = useState(false);
+  const [githubMessage, setGithubMessage] = useState("");
 
   async function loadDashboard() {
     const response = await fetch(`${API_BASE}/api/dashboard`);
@@ -19,14 +20,47 @@ export default function App() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const github = params.get("github");
+    const reason = params.get("reason");
+    if (!github) {
+      return;
+    }
+
+    if (github === "connected") {
+      setGithubMessage("GitHub account connected.");
+    } else if (github === "error") {
+      setGithubMessage(`GitHub connection failed${reason ? `: ${reason}` : ""}`);
+    }
+
+    params.delete("github");
+    params.delete("reason");
+    const next = params.toString();
+    window.history.replaceState({}, "", next ? `${window.location.pathname}?${next}` : window.location.pathname);
+    void loadDashboard();
+  }, []);
+
   async function connectGithub() {
     setConnecting(true);
     try {
-      await fetch(`${API_BASE}/api/github/connect`, { method: "POST" });
-      await loadDashboard();
+      const response = await fetch(`${API_BASE}/api/github/connect`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || "GitHub OAuth is not configured.");
+      }
+      window.location.href = data.authorizationUrl;
+    } catch (error) {
+      setGithubMessage(error.message || String(error));
     } finally {
       setConnecting(false);
     }
+  }
+
+  async function disconnectGithub() {
+    await fetch(`${API_BASE}/api/github/logout`, { method: "POST" });
+    setGithubMessage("GitHub account disconnected.");
+    await loadDashboard();
   }
 
   async function simulate(provider) {
@@ -56,6 +90,10 @@ export default function App() {
   const latestReceipt = dashboard.latestReceipt;
   const receiptContribution = latestReceipt?.modelEvidence?.contribution ?? null;
   const receiptCopilot = latestReceipt?.copilotContribution ?? latestReceipt?.modelEvidence?.copilotContribution ?? null;
+  const github = dashboard.github;
+  const commitTime = formatDateTime(dashboard.latestCommit?.authoredAt);
+  const receiptUpdatedTime = formatDateTime(latestReceipt?.updatedAt);
+  const recentCommits = Array.isArray(dashboard.recentCommits) ? dashboard.recentCommits : [];
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(21,128,61,0.24),_transparent_32%),linear-gradient(135deg,_#0c0a09,_#1c1917_48%,_#0f172a)] text-stone-100">
@@ -65,19 +103,32 @@ export default function App() {
             <div>
               <p className="text-xs uppercase tracking-[0.4em] text-emerald-300/80">Commit Confessional</p>
               <h1 className="mt-3 max-w-2xl text-4xl font-semibold tracking-tight text-white md:text-5xl">
-                Validate whether local proxy capture is strong enough before you wire the full GitHub workflow.
+                Track AI-assisted coding from capture through commit, with live evidence and narration.
               </h1>
               <p className="mt-4 max-w-2xl text-sm leading-7 text-stone-300">
-                This first milestone focuses on one question: can a local proxy reliably detect AI traffic and tell whether the prompt is about this repository? OAuth, commit attribution, and blockchain proofs only make sense after this layer works.
+                This dashboard now combines local capture events, commit receipts, and GitHub connection state so you can see when code was committed, how much AI likely contributed, and who the repo is connected to.
               </p>
+              {githubMessage ? (
+                <div className="mt-4 rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                  {githubMessage}
+                </div>
+              ) : null}
               <div className="mt-6 flex flex-wrap gap-3">
                 <button
                   onClick={connectGithub}
                   disabled={connecting}
                   className="rounded-full bg-white px-5 py-3 text-sm font-medium text-stone-950 transition hover:bg-emerald-200 disabled:opacity-60"
                 >
-                  {connecting ? "Connecting..." : "Connect GitHub"}
+                  {connecting ? "Connecting..." : github?.connected ? "Reconnect GitHub" : "Connect GitHub"}
                 </button>
+                {github?.connected ? (
+                  <button
+                    onClick={disconnectGithub}
+                    className="rounded-full border border-white/15 px-5 py-3 text-sm font-medium text-stone-200 transition hover:bg-white/5"
+                  >
+                    Disconnect GitHub
+                  </button>
+                ) : null}
                 <button
                   onClick={() => simulate("openai")}
                   disabled={simulating}
@@ -120,6 +171,8 @@ export default function App() {
                 accent="text-fuchsia-300"
                 details={[
                   `Author: ${dashboard.latestCommit.authorName ?? "unknown"}`,
+                  `Hash: ${dashboard.latestCommit.shortHash ?? "unknown"}`,
+                  `Authored: ${commitTime}`,
                   `Classification: ${dashboard.latestCommit.classification}`,
                 ]}
               />
@@ -138,7 +191,7 @@ export default function App() {
                   latestReceipt?.modelEvidence?.method
                     ? `Method: ${latestReceipt.modelEvidence.method}`
                     : "Method: waiting for first commit receipt",
-                  latestReceipt?.updatedAt ? `Updated: ${latestReceipt.updatedAt}` : "Run a commit to populate this",
+                  latestReceipt?.updatedAt ? `Updated: ${receiptUpdatedTime}` : "Run a commit to populate this",
                 ]}
               />
             </div>
@@ -225,6 +278,57 @@ export default function App() {
           </div>
 
           <div className="grid gap-6">
+            <Panel title="Recent commits">
+              {recentCommits.length === 0 ? (
+                <p className="text-sm text-stone-400">
+                  No commits available yet. Connect GitHub or make a local commit to populate this list.
+                </p>
+              ) : (
+                recentCommits.map((commit) => (
+                  <div key={commit.hash || commit.shortHash} className="rounded-2xl bg-black/20 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-white">{commit.subject}</div>
+                        <div className="mt-1 text-xs text-stone-400">
+                          {(commit.authorName || "Unknown author")} • {formatDateTime(commit.authoredAt)} •{" "}
+                          {commit.shortHash || "unknown"}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm font-semibold text-emerald-300">
+                          {commit.ai ? `${commit.ai.estimatedAiPercentage}% AI` : "AI unknown"}
+                        </div>
+                        <div className="mt-1 text-xs text-stone-400">
+                          {commit.copilot ? `${commit.copilot.estimatedAiPercentage}% Copilot` : "Copilot unknown"}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                      <span className="rounded-full bg-white/5 px-3 py-1 text-stone-300">
+                        Certainty: {commit.ai?.certainty ?? "unknown"}
+                      </span>
+                      <span className="rounded-full bg-white/5 px-3 py-1 text-stone-300">
+                        Method: {commit.ai?.method ?? "waiting for receipt"}
+                      </span>
+                      <span className="rounded-full bg-white/5 px-3 py-1 text-stone-300">
+                        Matched lines: {commit.ai ? `${commit.ai.aiMatchedLines}/${commit.ai.totalChangedLines}` : "--"}
+                      </span>
+                    </div>
+                    {commit.htmlUrl ? (
+                      <a
+                        href={commit.htmlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-3 inline-flex rounded-full border border-sky-400/30 bg-sky-500/10 px-4 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20"
+                      >
+                        Open commit on GitHub
+                      </a>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </Panel>
+
             <Panel title="Analysis summary">
               <MetricRow label="AI-related captures" value={String(dashboard.analytics.aiAssistedCommits)} />
               <MetricRow
@@ -255,6 +359,14 @@ export default function App() {
                         : "0/0"
                     }
                   />
+                  <MetricRow
+                    label="Commit"
+                    value={dashboard.latestCommit?.shortHash ?? "--"}
+                  />
+                  <MetricRow
+                    label="Committed at"
+                    value={commitTime}
+                  />
                   <div className="space-y-2 text-sm text-stone-300">
                     {(latestReceipt.modelEvidence?.evidence ?? []).length === 0 ? (
                       <div className="rounded-2xl bg-white/5 px-4 py-3 text-stone-400">
@@ -272,6 +384,30 @@ export default function App() {
               ) : (
                 <p className="text-sm text-stone-400">
                   No commit receipt yet. Commit once while the backend is running and the dashboard will show the percentage here.
+                </p>
+              )}
+            </Panel>
+
+            <Panel title="GitHub connection">
+              {github?.connected ? (
+                <div className="space-y-3 text-sm text-stone-300">
+                  <MetricRow label="Login" value={github.user?.login ?? "--"} />
+                  <MetricRow label="Name" value={github.user?.name ?? "--"} />
+                  <MetricRow label="Connected" value={formatDateTime(github.connectedAt)} />
+                  {github.user?.profileUrl ? (
+                    <a
+                      href={github.user.profileUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex rounded-full border border-sky-400/30 bg-sky-500/10 px-4 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20"
+                    >
+                      Open GitHub profile
+                    </a>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-sm text-stone-400">
+                  GitHub is not connected yet. Add `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` to `.env`, then connect from this dashboard.
                 </p>
               )}
             </Panel>
@@ -316,6 +452,19 @@ export default function App() {
       </div>
     </main>
   );
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "unknown";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
 }
 
 function StatusCard({ title, value, details, accent }) {
