@@ -7,6 +7,7 @@ const UNTRACKED_PREVIEW_MAX_BYTES = 256 * 1024;
 
 async function main() {
   const repoRoot = process.cwd();
+  // Optional single-file mode keeps the preview scoped to one changed file.
   const targetPath = resolveRequestedFile(repoRoot, process.argv.slice(2));
   const diffText = buildPreviewDiff(repoRoot, targetPath);
 
@@ -85,6 +86,7 @@ function buildPreviewDiff(repoRoot, targetPath = null) {
   const diffArgs = targetPath ? ["--", targetPath] : [];
   const stagedDiff = execGit(["diff", "--cached", "--unified=0", ...diffArgs], repoRoot);
   const workingDiff = execGit(["diff", "--unified=0", ...diffArgs], repoRoot);
+  // Untracked files need a synthetic diff because git diff omits them by default.
   const untrackedDiffs = readUntrackedFileDiffs(repoRoot, targetPath ? [targetPath] : null);
   return [stagedDiff, workingDiff, ...untrackedDiffs].filter(Boolean).join("\n");
 }
