@@ -1,18 +1,20 @@
-# Hackbyte VS Code Extension
+# Hackbyte Code Narrator
 
-This VS Code extension integrates with the Hackbyte analysis backend to provide real-time code insights and security analysis directly in your editor.
+This merged VS Code extension combines both previous editor integrations:
 
-## Features
+- Commit Confessional background detection for paste events, Copilot activity, and AI extension activation
+- Living Codebase Narrator save-to-doc pipeline with a sidebar webview for live documentation
 
-- Real-time model evidence analysis
-- Proxy configuration monitoring
-- Repository context analysis
-- Integrated security scanning
+## Commands
 
-## Installation
-
-Install the extension from the VS Code marketplace or load it locally for development.
+- `Commit Confessional: Show Output`
+- `Commit Confessional: Inspect AI Extensions`
+- `Commit Confessional: List Matching AI Extensions`
+- `Commit Confessional: Debug Status Report`
+- `LCN: Ping Backend`
+- `LCN: Show Output Log`
 
 ## Configuration
 
-Configure the extension settings to connect with your Hackbyte backend service instance.
+- `commitConfessional.*` controls background capture behavior
+- `lcn.*` controls narrator backend, debounce, and ignored paths

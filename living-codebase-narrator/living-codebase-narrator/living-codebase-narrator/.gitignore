@@ -1,0 +1,17 @@
+node_modules
+dist
+build
+.turbo
+.vite
+.env
+.env.*
+*.log
+.DS_Store
+
+# VS Code extension build artifacts
+apps/extension/out
+apps/extension/*.vsix
+
+# Local persistence
+.data
+

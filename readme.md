@@ -1,172 +1,87 @@
-# 🚀 CodeTruth – AI Code Provenance Tracker
+# CodeTruth + Living Codebase Narrator
 
-## 🧠 Overview
+This repository now hosts both hackathon projects in one place:
 
-CodeTruth is a developer tool that tracks, tags, and estimates AI-generated code contribution in a project. Instead of trying to detect AI-written code after the fact, CodeTruth captures AI usage **at the source** (copy/paste events) and maps it to Git commits.
+- `HackbyteProject` remains the AI provenance tracker that captures model usage, proxy events, and commit evidence.
+- `living-codebase-narrator` is included as a companion system that turns code deltas into narrated documentation cards.
 
----
+## Repo Layout
 
-## 🔥 Features
+- `backend/`: Commit Confessional / CodeTruth backend
+- `frontend/`: Commit Confessional dashboard
+- `firefox-extension/`: browser capture integration
+- `vscode-extension/`: local editor integration
+- `living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/`: imported narrator workspace
 
-* 📋 Detects copy events from AI tools (ChatGPT, Claude, Gemini)
-* 📌 Tracks paste events into the codebase
-* 🔗 Maps AI-generated content to Git commits
-* 📊 Calculates approximate AI vs Human contribution (%)
-* 🧾 Adds AI metadata to commit messages
-* 📈 Simple dashboard for visualization
+The narrator workspace keeps its original internal layout:
 
----
+- `apps/backend`: delta-to-doc backend
+- `apps/web`: live documentation feed
+- `apps/extension`: VS Code extension
+- `packages/types`: shared types
+- `spacetime/server`: SpacetimeDB module
 
-## 🏗️ Architecture
+## What Each Project Does
 
-### 1. Browser Extension
+### CodeTruth
 
-* Detects copy events from AI platforms
-* Captures copied content, source, and timestamp
-* Sends data to backend
+- Detects AI tool usage near the source
+- Stores prompt and proxy evidence
+- Correlates captures to repository context
+- Surfaces contribution and risk signals in a dashboard
 
-### 2. Backend (Node.js + Express)
+### Living Codebase Narrator
 
-* Stores AI interaction logs
-* Matches pasted code with stored AI content
-* Computes contribution metrics
+- Accepts code delta events
+- Generates narrative documentation entries
+- Exposes a live web feed for teammates
+- Supports optional audio narration and SpacetimeDB integration
 
-### 3. Git Hook Integration
+## Root Commands
 
-* Runs on `pre-commit`
-* Analyzes staged changes using `git diff --cached`
-* Calculates AI contribution percentage
-* Appends metadata to commit message
+Install and run the original Hackbyte app:
 
-### 4. Dashboard
-
-* Displays:
-
-  * AI vs Human %
-  * Model usage
-  * Timeline of AI-assisted commits
-
----
-
-## ⚙️ How It Works
-
-1. User copies code from an AI tool
-2. Extension logs the event
-3. User pastes code into project
-4. On commit:
-
-   * Diff is analyzed
-   * Lines are compared with AI logs
-   * % is calculated
-5. Commit message updated:
-
-```bash
-git commit -m "Add login API [AI: ChatGPT ~65%]"
-```
-
----
-
-## 📊 AI Contribution Calculation
-
-### Method: Diff-based Approximation
-
-```
-AI % = (AI-matched lines / total added lines) * 100
-```
-
-### Notes
-
-* Uses string similarity matching
-* Provides approximate (not exact) values
-* Can be extended with advanced ML models
-
----
-
-## 🛠️ Tech Stack
-
-* Backend: Node.js, Express
-* Database: MongoDB
-* Extension: JavaScript (Chrome/Firefox APIs)
-* Git Hooks: Shell + Node.js
-* Frontend: React / HTML
-
----
-
-## 🚀 Getting Started
-
-### 1. Clone Repo
-
-```bash
-git clone https://github.com/your-username/codetruth.git
-cd codetruth
-```
-
-### 2. Install Dependencies
-
-```bash
+```powershell
 npm install
+npm run dev:backend
+npm run dev:frontend
 ```
 
-### 3. Run Backend
+Run the imported narrator services from this same repo root:
 
-```bash
-npm start
+```powershell
+npm run dev:narrator:backend
+npm run dev:narrator:web
 ```
 
-### 4. Load Extension
+Run both narrator services together:
 
-* Open browser extensions
-* Enable Developer Mode
-* Load unpacked extension
-
-### 5. Setup Git Hook
-
-```bash
-cp hooks/pre-commit .git/hooks/pre-commit
-chmod +x .git/hooks/pre-commit
+```powershell
+npm run dev:narrator
 ```
 
----
+Run both Hackbyte services and both narrator services together:
 
-## ⚠️ Limitations
+```powershell
+npm run dev:all
+```
 
-* Cannot detect AI code written manually
-* Users can modify AI code after pasting
-* Percentage is an approximation, not exact
+Build the two web apps separately:
 
----
+```powershell
+npm run build
+npm run build:narrator:web
+```
 
-## 💡 Future Improvements
+## Current Merge Shape
 
-* VS Code extension for better tracking
-* ML-based similarity detection
-* Blockchain-based tamper-proof logs
-* Multi-repo analytics dashboard
+This is a repository merge, not a full product fusion yet. Both apps now live in one codebase with shared root-level commands, but their APIs and UIs are still separate:
 
----
+- CodeTruth backend defaults to `http://localhost:4000`
+- Narrator backend keeps its own backend inside the imported workspace
 
-## 🏆 Hackathon Pitch
+That keeps both projects runnable while leaving room for a later phase where:
 
-> "We don’t detect AI code — we prove where it came from."
-
----
-
-## 🤝 Contributing
-
-We welcome contributions from the community! To contribute:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-Please ensure all tests pass and code follows our style guide before submitting.
-
-## 📧 Support & Feedback
-
-For issues, feature requests, or feedback, please open an issue on GitHub or contact our team. Your input helps us improve CodeTruth!
-
-## 📜 License
-
-MIT License
+1. the narrator feed can be embedded into the main dashboard
+2. proxy captures can generate narrated documentation automatically
+3. contributor evidence and live code narration can share one backend contract

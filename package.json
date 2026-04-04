@@ -10,7 +10,12 @@
     "dev": "npm run dev --workspace backend",
     "dev:backend": "npm run dev --workspace backend",
     "dev:frontend": "npm run dev --workspace frontend",
+    "dev:narrator": "node scripts/run-merged-dev.mjs narrator",
+    "dev:narrator:backend": "npm run dev --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/backend",
+    "dev:narrator:web": "npm run dev --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/web",
+    "dev:all": "node scripts/run-merged-dev.mjs all",
     "build": "npm run build --workspace frontend",
+    "build:narrator:web": "npm run build --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/web",
     "install:firefox-native": "node firefox-extension/install-native-host.js",
     "receipt:post-commit": "node scripts/post-commit-receipt.js",
     "receipt:preview": "node scripts/preview-receipt.js"

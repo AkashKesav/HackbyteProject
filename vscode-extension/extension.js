@@ -1,356 +1,346 @@
-// VS Code Extension: Commit Confessional Detector
-// Monitors and logs Copilot command usage for diagnostic analysis and event tracking.
-// This VS Code extension module provides the main entry point for the Commit Confessional detector.
-// It imports necessary Node.js modules for file system operations, path handling, and cryptography.
-// The extension uses VS Code's API to register commands and listen for editor events.
-// All module dependencies are imported at the top to ensure they're available throughout the extension.
-// The extension is designed to be lightweight and performant with minimal overhead on VS Code.
-
 const vscode = require("vscode");
+const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
-// This extension tracks Copilot-related command usage in VS Code.
-// It listens for command execution and text document changes,
-// then logs events to a local JSONL file for later inspection.
-// The detector is designed to identify Copilot inline suggestions,
-// paste-like insertions, and AI extension activation behavior.
-// This is intended for diagnostics and awareness, not for data exfiltration.
-// The module keeps a lightweight output channel updated with status,
-// and uses timers to periodically poll extension activation and logs.
-// Most logic is wrapped in safeRun() to prevent one failure from
-// disabling the whole extension host integration.
-// The command map is used to convert internal command IDs to readable labels.
-
+const LOG_PATH = path.join(os.homedir(), ".cc-vscode-log.jsonl");
+const TOOL_WINDOW_MS = 3000;
+const COPILOT_LOG_WINDOW_MS = 8000;
+const DEFAULT_SESSION_ID = "local-dev";
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
   "editor.action.inlineSuggest.acceptNextLine": "Inline Suggestion (Next Line)",
   "editor.action.inlineSuggest.acceptNextWord": "Inline Suggestion (Next Word)",
   "github.copilot.chat.inlineChat.start": "Inline Chat",
   "github.copilot.chat.inlineChat.accept": "Inline Chat (Accepted)",
-  "github.copilot.chat.inlineChat.discard": "Inline Chat (Discarded)",
   "github.copilot.edits.apply": "Copilot Edits",
-  "github.copilot.edits.acceptAllEdits": "Copilot Edits (Accept All)",
-  "github.copilot.edits.acceptFile": "Copilot Edits (Accept File)",
-  "github.copilot.edits.rejectAllEdits": "Copilot Edits (Rejected)",
   "github.copilot.chat.applyInEditor": "Chat -> Apply in Editor",
-  "github.copilot.chat.insertIntoNewFile": "Chat -> Insert New File",
   "github.copilot.chat.insertAtCursor": "Chat -> Insert at Cursor",
   "github.copilot.fixes.apply": "Copilot Fix",
   "github.copilot.generateTests.apply": "Copilot Generate Tests",
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
 };
 
-// Global variables to manage extension state and timers
-// These track output, timers, context, and user interactions throughout the extension lifecycle
-
 let outputChannel;
 let activationTimer;
 let copilotLogTimer;
-let lastPromptContext = null;
-let lastManualKeystrokeAt = 0;
-
-// Track pending tool calls and their timing for correlation with detected commands
 let pendingTool = null;
 let pendingToolTime = 0;
 let lastCopilotLogActivityAt = 0;
-
-// Maintain extension state mappings and monitor Copilot log file for real-time events
-const extensionStates = new Map();
+let lastPromptContext = null;
 let watchedCopilotLogPath = null;
 let watchedCopilotLogSize = 0;
+let commitPollTimer;
+
+const extensionStates = new Map();
 const seenCopilotLogLines = new Set();
-// Configuration for event logging file location in user home directory
-const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
-const TOOL_WINDOW_MS = 3000;
-const COPILOT_LOG_WINDOW_MS = 8000;
+const narratorSnapshots = new Map();
+const narratorPending = new Map();
+const repoHeads = new Map();
 
-// Activates the extension when VS Code loads
-// Sets up the output channel for logging events and user notifications
-// Registers command handlers for inspecting extensions and viewing logs
-// Establishes watchers for command execution and document changes
-// Initializes timers to monitor Copilot activity periodically
-// Primary entry point that initializes all extension components and event listeners
-function activate(context) {
-  outputChannel = vscode.window.createOutputChannel("Commit Confessional");
-  outputChannel.appendLine("Commit Confessional detector started.");
-  outputChannel.show(true);
-  void vscode.window.showInformationMessage(
-    "Commit Confessional detector is active. Open the 'Commit Confessional' output channel."
-  );
+class SidebarProvider {
+  static viewType = "lcn.sidebar";
 
-  context.subscriptions.push(outputChannel);
-  context.subscriptions.push(
-    vscode.commands.registerCommand("commitConfessional.showOutput", () => {
-      outputChannel.show(true);
-    })
-  );
-  context.subscriptions.push(
-    vscode.commands.registerCommand("commitConfessional.inspectAiExtensions", async () => {
-      const snapshot = getWatchedExtensions().map((id) => {
-        const ext = vscode.extensions.getExtension(id);
-        return `${id}: ${ext ? (ext.isActive ? "active" : "installed-inactive") : "not-installed"}`;
-      });
-      outputChannel.appendLine(snapshot.join("\n"));
-      outputChannel.show(true);
-    })
-  );
-  context.subscriptions.push(
-    vscode.commands.registerCommand("commitConfessional.listMatchingExtensions", async () => {
-      const matches = vscode.extensions.all
-        .map((ext) => ext.id)
-        .filter((id) => /(copilot|codex|openai|chatgpt)/i.test(id))
-        .sort();
-
-      outputChannel.appendLine("Matching installed extensions:");
-      outputChannel.appendLine(matches.length ? matches.join("\n") : "No matching extensions found.");
-      outputChannel.show(true);
-    })
-  );
-  context.subscriptions.push(
-    vscode.commands.registerCommand("commitConfessional.debugStatus", async () => {
-      outputChannel.clear();
-      outputChannel.appendLine("===== COMMIT CONFESSIONAL DEBUG STATUS =====");
-      outputChannel.appendLine(`Timestamp: ${new Date().toISOString()}`);
-      outputChannel.appendLine(`Log file: ${vscodeLogPath}`);
-      outputChannel.appendLine(`Log exists: ${fs.existsSync(vscodeLogPath)}`);
-      
-      const appData = process.env.APPDATA;
-      const logsRoot = appData ? path.join(appData, "Code", "logs") : "APPDATA not set";
-      outputChannel.appendLine(`\nVS Code Logs Root: ${logsRoot}`);
-      outputChannel.appendLine(`Logs directory exists: ${fs.existsSync(logsRoot)}`);
-      
-      const latestLog = findLatestCopilotLog();
-      outputChannel.appendLine(`Copilot log found: ${latestLog ? latestLog.fullPath : "NO"}`);
-      
-      outputChannel.appendLine(`\nWatched Extensions Status:`);
-      getWatchedExtensions().forEach((id) => {
-        const ext = vscode.extensions.getExtension(id);
-        const status = ext ? (ext.isActive ? "🟢 ACTIVE" : "🟡 INSTALLED") : "🔴 NOT INSTALLED";
-        outputChannel.appendLine(`  ${id}: ${status}`);
-      });
-      
-      outputChannel.appendLine(`\nCommand API Status:`);
-      outputChannel.appendLine(`  onWillExecuteCommand available: ${typeof vscode.commands.onWillExecuteCommand === "function" ? "YES" : "NO"}`);
-      
-      outputChannel.appendLine(`\nLast Prompt Context: ${lastPromptContext ? JSON.stringify(lastPromptContext, null, 2) : "NONE"}`);
-      outputChannel.appendLine(`Current Tool: ${currentTool()}`);
-      outputChannel.appendLine(`Tool Window MS: ${TOOL_WINDOW_MS}`);
-      
-      outputChannel.appendLine(`\nBackend Configuration:`);
-      outputChannel.appendLine(`  Backend URL: ${getConfig("backendUrl") || "NOT SET"}`);
-      outputChannel.appendLine(`  AI Extensions Config: ${JSON.stringify(getConfig("aiExtensions"))}`);
-      outputChannel.appendLine(`  Paste Min Length: ${getConfig("pasteMinLength") || "default (12)"}`);
-      outputChannel.appendLine(`  Prompt Window MS: ${getConfig("promptWindowMs") || "default (60000)"}`);
-      
-      outputChannel.appendLine(`\nTesting clipboard access...`);
-      const clipboardText = await readClipboardSafe();
-      outputChannel.appendLine(`  Clipboard readable: ${clipboardText ? "YES" : "NO"}`);
-      outputChannel.appendLine(`  Clipboard length: ${clipboardText.length} chars`);
-      
-      outputChannel.appendLine(`\n===== END DEBUG STATUS =====`);
-      outputChannel.show(true);
-    })
-  );
-  const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
-  if (typeof onWillExecuteCommand === "function") {
-    outputChannel.appendLine("✓ Command execution monitoring enabled");
-    context.subscriptions.push(
-      onWillExecuteCommand((event) => {
-        safeRun("onWillExecuteCommand", () => {
-          const commandName = event && typeof event.command === "string" ? event.command : "";
-          const toolName = COPILOT_COMMANDS[commandName];
-          
-          // Debug: Log all commands for diagnostics
-          if (commandName && commandName.startsWith("github.copilot")) {
-            outputChannel.appendLine(`[DEBUG] Raw Copilot command detected: ${commandName}`);
-          }
-          
-          if (!toolName) {
-            return;
-          }
-
-          markTool(toolName);
-          outputChannel.appendLine(`[${new Date().toISOString()}] ✓ copilot-command: ${commandName} -> ${toolName}`);
-          appendJsonLine(vscodeLogPath, {
-            ts: new Date().toISOString(),
-            label: "copilot-command",
-            source: "copilot-command",
-            provider: "copilot",
-            command: commandName,
-            tool: toolName,
-          });
-        });
-      })
-    );
-  } else {
-    outputChannel.appendLine("✗ onWillExecuteCommand is NOT available in this VS Code host.");
+  constructor(context) {
+    this.context = context;
+    this.view = undefined;
+    this.lastDocsJson = "[]";
+    this.pollTimer = undefined;
   }
 
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeTextDocument((event) => {
-      safeRun("onDidChangeTextDocument", () => {
-        void handleDocumentChange(event);
-      });
-    })
-  );
+  resolveWebviewView(view) {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = this.renderHtml(view.webview);
+    view.webview.onDidReceiveMessage(async (msg) => {
+      if (msg?.type === "openFile" && typeof msg.filePath === "string") {
+        try {
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.filePath));
+          await vscode.window.showTextDocument(doc, { preview: true });
+        } catch (error) {
+          log(`openFile failed: ${error?.message || String(error)}`);
+        }
+      }
+      if (
+        msg?.type === "vote" &&
+        typeof msg.id === "string" &&
+        (msg.direction === "up" || msg.direction === "down")
+      ) {
+        const cfg = getNarratorConfig();
+        try {
+          await fetchJson(`${trimSlash(cfg.backendUrl)}/docs/${msg.id}/vote`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ direction: msg.direction }),
+          });
+        } catch (error) {
+          log(`vote failed: ${error?.message || String(error)}`);
+        }
+      }
+    });
+    this.startPolling();
+  }
 
-  activationTimer = setInterval(() => {
-    void pollAiExtensionActivation();
-  }, 2000);
-  copilotLogTimer = setInterval(() => {
-    void pollCopilotLogs();
-  }, 3000);
+  notifyDocs(docs) {
+    this.lastDocsJson = JSON.stringify(docs);
+    this.view?.webview.postMessage({ type: "docs", docs });
+  }
 
+  startPolling() {
+    const poll = async () => {
+      const cfg = getNarratorConfig();
+      try {
+        const payload = await fetchJson(`${trimSlash(cfg.backendUrl)}/docs?limit=25`);
+        const docs = Array.isArray(payload.docs) ? payload.docs : [];
+        const next = JSON.stringify(docs);
+        if (next !== this.lastDocsJson) {
+          this.lastDocsJson = next;
+          this.view?.webview.postMessage({ type: "docs", docs });
+        }
+      } catch {}
+    };
+    void poll();
+    this.pollTimer = setInterval(() => void poll(), 1500);
+    this.context.subscriptions.push({ dispose: () => this.pollTimer && clearInterval(this.pollTimer) });
+  }
+
+  renderHtml(webview) {
+    const nonce = crypto.randomBytes(16).toString("base64");
+    return `<!doctype html><html><head>
+      <meta charset="utf-8"/>
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src http: https:;">
+      <style>
+        body{margin:0;background:#0f1116;color:#e6e9ef;font:12px var(--vscode-font-family)}
+        .head{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);background:linear-gradient(180deg,rgba(54,179,126,.18),transparent)}
+        .tabs,.meta,.actions{display:flex;gap:6px}.tabs{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.08)}
+        .tab,.btn{background:transparent;color:#9aa4b2;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:4px 8px;cursor:pointer}
+        .tab.active{color:#e6e9ef;border-color:rgba(54,179,126,.4);background:rgba(54,179,126,.12)}
+        #explorer,#editor,#docs{padding:10px}.panel{display:none}.panel.active{display:block}
+        pre{white-space:pre-wrap;word-break:break-word;background:#151a23;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.08)}
+        .file,.card{padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:#151a23;margin-bottom:8px}
+        .muted{color:#9aa4b2}.tag{color:#7ee2b8;margin-right:6px}.btn.good{color:#8fd0a6}.btn.bad{color:#f38ba8}
+      </style></head><body>
+      <div class="head"><strong>Hackbyte Narrator</strong><div class="muted">Merged detector + live docs</div></div>
+      <div class="tabs">
+        <button class="tab" data-tab="explorer">Explorer</button>
+        <button class="tab" data-tab="editor">Editor</button>
+        <button class="tab active" data-tab="docs">Live Docs</button>
+      </div>
+      <div id="explorer" class="panel"></div>
+      <div id="editor" class="panel"></div>
+      <div id="docs" class="panel active"></div>
+      <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi(); let docs = []; let active = "docs"; const votes = new Map();
+        const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+        const tail = (s) => { s = String(s || ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf(String.fromCharCode(92))); return i >= 0 ? s.slice(i + 1) : s; };
+        function setTab(name){ active = name; document.querySelectorAll(".tab").forEach((b)=>b.classList.toggle("active", b.dataset.tab===name)); document.querySelectorAll(".panel").forEach((p)=>p.classList.toggle("active", p.id===name)); }
+        function render(){
+          const files = [...new Set(docs.map((d)=>d.filePath).filter(Boolean))];
+          document.getElementById("explorer").innerHTML = files.map((fp)=>'<div class="file" data-fp="'+esc(fp)+'">'+esc(tail(fp))+"</div>").join("") || '<div class="muted">No docs yet</div>';
+          document.querySelectorAll(".file").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"openFile", filePath:el.dataset.fp}));
+          const latest = docs[0];
+          document.getElementById("editor").innerHTML = latest ? '<div class="meta muted">'+esc(latest.language || "text")+"</div><pre>"+esc(latest.diff || "")+"</pre>" : '<div class="muted">Save a file to generate a diff.</div>';
+          document.getElementById("docs").innerHTML = docs.map((d)=>'<div class="card"><strong>'+esc(tail(d.filePath||"unknown"))+'</strong><div class="muted">'+esc(d.language||"text")+'</div><div style="margin-top:6px">'+esc(d.summary||"")+'</div><div style="margin-top:6px">'+((d.tags||[]).map((t)=>'<span class="tag">#'+esc(t)+'</span>').join(""))+'</div><div class="actions" style="margin-top:8px"><button class="btn good" data-id="'+esc(d.id)+'" data-dir="up">thumbs up</button><button class="btn bad" data-id="'+esc(d.id)+'" data-dir="down">flag</button></div></div>').join("") || '<div class="muted">Waiting for live docs.</div>';
+          document.querySelectorAll(".btn[data-id]").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"vote", id:el.dataset.id, direction:el.dataset.dir}));
+        }
+        window.addEventListener("message",(e)=>{ if(e.data?.type==="docs"){ docs = Array.isArray(e.data.docs) ? e.data.docs : []; render(); } });
+        document.querySelectorAll(".tab").forEach((b)=>b.onclick=()=>setTab(b.dataset.tab)); render();
+      </script></body></html>`;
+  }
+}
+
+function activate(context) {
+  outputChannel = vscode.window.createOutputChannel("Hackbyte Code Narrator");
+  const sidebar = new SidebarProvider(context);
+  context.subscriptions.push(outputChannel);
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar));
+
+  registerCommands(context);
+  registerListeners(context, sidebar);
+
+  activationTimer = setInterval(() => void pollAiExtensionActivation(), 2000);
+  copilotLogTimer = setInterval(() => void pollCopilotLogs(), 3000);
+  commitPollTimer = setInterval(() => void pollWorkspaceCommits(), 12000);
   context.subscriptions.push({
     dispose() {
-      if (activationTimer) {
-        clearInterval(activationTimer);
-      }
-      if (copilotLogTimer) {
-        clearInterval(copilotLogTimer);
-      }
+      if (activationTimer) clearInterval(activationTimer);
+      if (copilotLogTimer) clearInterval(copilotLogTimer);
+      if (commitPollTimer) clearInterval(commitPollTimer);
+      for (const item of narratorPending.values()) clearTimeout(item.timer);
     },
   });
 
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === "file" && !doc.isUntitled) {
+      narratorSnapshots.set(doc.uri.fsPath, { text: doc.getText(), version: doc.version });
+    }
+  }
+
+  log("Merged VS Code extension started.");
   void pollAiExtensionActivation(true);
   void pollCopilotLogs(true);
+  void pollWorkspaceCommits(true);
 }
 
-// Cleans up resources when the extension is deactivated or VS Code shuts down
 function deactivate() {
-  if (activationTimer) {
-    clearInterval(activationTimer);
-  }
-  if (copilotLogTimer) {
-    clearInterval(copilotLogTimer);
-  }
+  if (activationTimer) clearInterval(activationTimer);
+  if (copilotLogTimer) clearInterval(copilotLogTimer);
+  if (commitPollTimer) clearInterval(commitPollTimer);
 }
 
-// Monitors text document changes to detect AI-generated content and paste operations
+function registerCommands(context) {
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.showOutput", () => outputChannel.show(true)));
+  context.subscriptions.push(vscode.commands.registerCommand("lcn.showLog", () => outputChannel.show(true)));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.inspectAiExtensions", () => {
+    const snapshot = getWatchedExtensions().map((id) => {
+      const ext = vscode.extensions.getExtension(id);
+      return `${id}: ${ext ? (ext.isActive ? "active" : "installed-inactive") : "not-installed"}`;
+    });
+    outputChannel.appendLine(snapshot.join("\n"));
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.listMatchingExtensions", () => {
+    const matches = vscode.extensions.all.map((ext) => ext.id).filter((id) => /(copilot|codex|openai|chatgpt)/i.test(id)).sort();
+    outputChannel.appendLine(matches.length ? matches.join("\n") : "No matching extensions found.");
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.debugStatus", async () => {
+    outputChannel.clear();
+    outputChannel.appendLine(`Detector log: ${LOG_PATH}`);
+    outputChannel.appendLine(`Commit backend: ${getCommitConfig("backendUrl") || "NOT SET"}`);
+    outputChannel.appendLine(`Narrator backend: ${getNarratorConfig().backendUrl}`);
+    outputChannel.appendLine(`Current tool: ${currentTool()}`);
+    outputChannel.appendLine(`Clipboard length: ${(await readClipboardSafe()).length}`);
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("lcn.pingBackend", async () => {
+    const cfg = getNarratorConfig();
+    try {
+      const response = await fetch(`${trimSlash(cfg.backendUrl)}/health`);
+      log(`LCN /health ${response.status}`);
+      void vscode.window.showInformationMessage(`LCN backend ${response.status}`);
+    } catch (error) {
+      log(`LCN health failed: ${error?.message || String(error)}`);
+      void vscode.window.showErrorMessage(`LCN backend unavailable`);
+    }
+  }));
+}
+
+function registerListeners(context, sidebar) {
+  const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
+  if (typeof onWillExecuteCommand === "function") {
+    context.subscriptions.push(onWillExecuteCommand((event) => {
+      const toolName = COPILOT_COMMANDS[event?.command];
+      if (!toolName) return;
+      pendingTool = toolName;
+      pendingToolTime = Date.now();
+      appendJsonLine({ label: "copilot-command", provider: "copilot", command: event.command, tool: toolName });
+      log(`copilot-command: ${event.command} -> ${toolName}`);
+    }));
+  }
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => void handleDocumentChange(event)));
+  context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => void handleNarratorSave(doc, sidebar)));
+}
+
 async function handleDocumentChange(event) {
-  if (!event?.contentChanges?.length) {
-    return;
-  }
-
-  if (shouldIgnoreDocument(event.document)) {
-    return;
-  }
-
+  if (!event?.contentChanges?.length || shouldIgnoreDocument(event.document)) return;
   const change = event.contentChanges[0];
   const insertedText = String(change.text || "");
-  if (!insertedText.trim()) {
-    return;
-  }
+  if (!insertedText.trim()) return;
 
   const now = Date.now();
   const documentPath = event.document?.uri?.fsPath || event.document?.uri?.toString() || "unknown";
   const promptPreview = buildPreview(insertedText);
-  // Identify prompt-like text by checking length and keywords suggesting user instructions
-  const isPromptLike = insertedText.trim().length >= 20 && /[?]|review|explain|fix|generate|write|debug|refactor/i.test(insertedText);
   const looksTyped = insertedText.length === 1 && !insertedText.includes("\n");
-  const isNonTrivialInsertion = insertedText.length > 20 || insertedText.includes("\n");
-  
-  // Debug logging for document changes
-  if (isNonTrivialInsertion) {
-    outputChannel.appendLine(`[DEBUG] Document change detected: ${insertedText.length} chars, file: ${path.basename(documentPath)}`);
-  }
+  if (looksTyped) return;
 
-  if (isPromptLike) {
-    lastPromptContext = {
-      source: "text-edit",
-      createdAt: now,
-      preview: promptPreview,
-      documentPath,
-    };
-  }
-
-  if (looksTyped) {
-    lastManualKeystrokeAt = now;
-    clearPendingTool();
-    return;
-  }
-
-  // Retrieve clipboard content to compare with inserted text for paste detection
   const clipboardText = await readClipboardSafe();
   const isPaste = detectPaste(insertedText, clipboardText);
-  const activeTool = currentTool();
-  const inferredSource = classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTrivialInsertion);
-  const contentHash = hashContent(isPaste ? clipboardText : insertedText);
-
-  // Debug logging for insertion analysis
-  if (isNonTrivialInsertion) {
-    outputChannel.appendLine(`[DEBUG] Analysis: isPaste=${isPaste}, activeTool=${activeTool}, source=${inferredSource}`);
-    if (isPaste) {
-      outputChannel.appendLine(`[DEBUG] Paste detected - clipboard matches inserted text`);
-    } else if (activeTool !== "Human / Unknown") {
-      outputChannel.appendLine(`[DEBUG] Tool active: ${activeTool}`);
-    }
-  }
-
-  if (inferredSource === "typed") {
-    if (insertedText.length <= 8) {
-      clearPendingTool();
-    }
-    return;
-  }
+  const source = classifyInsertionSource(now, isPaste, insertedText);
+  if (source === "typed") return;
 
   lastPromptContext = {
-    source: inferredSource,
+    source,
     createdAt: now,
     preview: buildPreview(isPaste ? clipboardText : insertedText),
     documentPath,
   };
 
-  await emitEvent(inferredSource === "paste-event" ? "paste-detected" : "inline-suggestion", {
+  await emitCommitEvent(source === "paste-event" ? "paste-detected" : "inline-suggestion", {
     appName: "vscode",
-    provider: inferredSource === "inline-suggestion" ? "copilot" : "editor",
+    provider: source === "inline-suggestion" ? "copilot" : "editor",
     extensionId: "vscode.editor",
     documentPath,
-    method: inferredSource === "inline-suggestion" ? "SUGGESTION" : "PASTE",
-    eventType: inferredSource,
+    method: source === "inline-suggestion" ? "SUGGESTION" : "PASTE",
+    eventType: source,
     clipboardPreview: buildPreview(clipboardText),
     promptPreview,
-    contentHash,
+    contentHash: hashContent(isPaste ? clipboardText : insertedText),
     lineCount: insertedText.split(/\r?\n/).length,
     contentText: isPaste ? clipboardText : insertedText,
-    tool: activeTool,
+    tool: currentTool(),
   });
+}
+
+async function handleNarratorSave(doc, sidebar) {
+  if (doc.isUntitled || doc.uri.scheme !== "file") return;
+  const cfg = getNarratorConfig();
+  const fsPath = doc.uri.fsPath;
+  if (isIgnoredByNarrator(fsPath, cfg.ignoreGlobs)) return;
+
+  const previous = narratorSnapshots.get(fsPath)?.text ?? "";
+  const next = doc.getText();
+  narratorSnapshots.set(fsPath, { text: next, version: doc.version });
+
+  const diff = createUnifiedDiff(fsPath, previous, next);
+  const changedLines = countChangedLines(diff);
+  if (changedLines < cfg.minChangedLines) return;
+
+  const existing = narratorPending.get(fsPath);
+  if (existing) clearTimeout(existing.timer);
+
+  const timer = setTimeout(async () => {
+    narratorPending.delete(fsPath);
+    const payload = {
+      sessionId: DEFAULT_SESSION_ID,
+      author: vscode.env.machineId ? `dev-${vscode.env.machineId.slice(0, 6)}` : "dev",
+      filePath: fsPath,
+      language: doc.languageId,
+      diff,
+      context: next.slice(0, 8000),
+      changedLines,
+      source: "vscode",
+    };
+    try {
+      const response = await fetchJson(`${trimSlash(cfg.backendUrl)}/deltas`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (response?.doc) sidebar.notifyDocs([response.doc]);
+      log(`LCN delta sent: ${fsPath}`);
+    } catch (error) {
+      log(`LCN delta failed: ${error?.message || String(error)}`);
+    }
+  }, cfg.debounceMs);
+
+  narratorPending.set(fsPath, { timer });
 }
 
 async function pollAiExtensionActivation(initial = false) {
   const now = Date.now();
-
-  // Iterate through all tracked AI extensions and check their activation state
   for (const extensionId of getWatchedExtensions()) {
     const extension = vscode.extensions.getExtension(extensionId);
     const isActive = Boolean(extension?.isActive);
-    const previousState = extensionStates.get(extensionId);
+    const previous = extensionStates.get(extensionId);
     extensionStates.set(extensionId, isActive);
-
-    // Debug: Log extension status on initial check
-    if (initial) {
-      const status = extension ? (isActive ? "active" : "installed-inactive") : "not-installed";
-      outputChannel.appendLine(`[DEBUG] Extension status: ${extensionId} = ${status}`);
-    }
-
-    if (initial || !extension || !isActive || previousState === isActive) {
-      continue;
-    }
-    
-    outputChannel.appendLine(`[DEBUG] Extension activated: ${extensionId}`);
-
-    const provider = detectProviderFromExtensionId(extensionId);
+    if (initial || !extension || !isActive || previous === isActive) continue;
     const recentPrompt = getRecentPromptContext(now);
-    const summary = recentPrompt
-      ? `${extensionId} activated after recent ${recentPrompt.source}: ${recentPrompt.preview}`
-      : `${extensionId} activated with no recent prompt context`;
-
-    await emitEvent("ai-activated", {
+    await emitCommitEvent("ai-activated", {
       appName: "vscode",
-      provider,
+      provider: detectProviderFromExtensionId(extensionId),
       extensionId,
       eventType: "ai-activated",
       method: "ACTIVATE",
@@ -359,61 +349,125 @@ async function pollAiExtensionActivation(initial = false) {
       clipboardPreview: recentPrompt?.source === "paste-event" ? recentPrompt.preview : "none",
       endpoint: `vscode-extension://${extensionId}`,
       tabTitle: vscode.window.activeTextEditor?.document?.fileName || "",
-      summary,
     });
   }
 }
 
-async function emitEvent(label, payload) {
-  const line = `[${new Date().toISOString()}] ${label}: ${payload.extensionId || payload.provider} ${payload.promptPreview || ""}`.trim();
-  outputChannel.appendLine(line);
-  appendJsonLine(vscodeLogPath, {
-    ts: new Date().toISOString(),
-    label,
-    source: payload.eventType || label,
-    ...payload,
-  });
+async function pollWorkspaceCommits(initial = false) {
+  const folders = vscode.workspace.workspaceFolders || [];
+  for (const folder of folders) {
+    const repoRoot = folder.uri.fsPath;
+    let headSha = "";
+    try {
+      headSha = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim();
+    } catch {
+      continue;
+    }
 
-  const backendUrl = getConfig("backendUrl");
-  if (!backendUrl) {
-    return;
+    const previousHead = repoHeads.get(repoRoot);
+    repoHeads.set(repoRoot, headSha);
+    if (initial || !previousHead || previousHead === headSha) {
+      continue;
+    }
+
+    try {
+      const diffText = await runGit(["show", "--format=", "--unified=0", headSha], repoRoot);
+      const latestCommit = await runGit(["show", "-s", "--format=%s", headSha], repoRoot);
+      await fetch(`${trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "")}/api/receipt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          commitHash: headSha,
+          diffText,
+          receiptUrl: `commit://${headSha}`,
+          commitMessage: latestCommit.trim(),
+        }),
+      });
+      log(`Commit receipt published for ${headSha.slice(0, 8)}`);
+    } catch (error) {
+      log(`Commit receipt publish failed: ${error?.message || String(error)}`);
+    }
   }
+}
 
+async function emitCommitEvent(label, payload) {
+  appendJsonLine({ label, source: payload.eventType || label, ...payload });
+  const backendUrl = getCommitConfig("backendUrl");
+  if (!backendUrl) return;
   try {
     await fetch(backendUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        ...payload,
-        userAgent: "vscode-extension",
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, userAgent: "vscode-extension" }),
     });
   } catch (error) {
-    outputChannel.appendLine(`Backend post failed: ${error?.message || String(error)}`);
+    log(`commit backend failed: ${error?.message || String(error)}`);
+  }
+}
+
+async function pollCopilotLogs(initial = false) {
+  const latestLog = findLatestCopilotLog();
+  if (!latestLog) {
+    if (initial) log("No Copilot log file found.");
+    return;
+  }
+  if (watchedCopilotLogPath !== latestLog.fullPath) {
+    watchedCopilotLogPath = latestLog.fullPath;
+    watchedCopilotLogSize = 0;
+    seenCopilotLogLines.clear();
+  }
+  const chunk = readNewLogChunk(watchedCopilotLogPath, watchedCopilotLogSize);
+  if (!chunk) return;
+  watchedCopilotLogSize = chunk.nextOffset;
+  for (const line of chunk.lines) {
+    const normalizedLine = String(line || "").trim();
+    const model = extractModelHint(normalizedLine);
+    const dedupeKey = `${watchedCopilotLogPath}|${normalizedLine}`;
+    if (!model || seenCopilotLogLines.has(dedupeKey)) continue;
+    seenCopilotLogLines.add(dedupeKey);
+    lastCopilotLogActivityAt = Date.now();
+    const tool = inferToolFromCopilotLogLine(normalizedLine);
+    if (tool) {
+      pendingTool = tool;
+      pendingToolTime = Date.now();
+    }
+    appendJsonLine({ label: "model-query", source: "copilot-log", provider: "copilot", model, rawLine: normalizedLine });
   }
 }
 
 function getWatchedExtensions() {
-  const configured = getConfig("aiExtensions");
+  const configured = getCommitConfig("aiExtensions");
   return Array.isArray(configured) ? configured : [];
 }
 
 function getRecentPromptContext(now) {
-  if (!lastPromptContext) {
-    return null;
-  }
-
-  if (now - lastPromptContext.createdAt > Number(getConfig("promptWindowMs") || 60000)) {
-    return null;
-  }
-
-  return lastPromptContext;
+  if (!lastPromptContext) return null;
+  return now - lastPromptContext.createdAt <= Number(getCommitConfig("promptWindowMs") || 60000)
+    ? lastPromptContext
+    : null;
 }
 
 function getActiveDocumentPath() {
   return vscode.window.activeTextEditor?.document?.uri?.fsPath || "unknown";
+}
+
+function currentTool() {
+  if (pendingTool && Date.now() - pendingToolTime < TOOL_WINDOW_MS) return pendingTool;
+  if (Date.now() - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) return "Copilot (log activity)";
+  return "Human / Unknown";
+}
+
+function classifyInsertionSource(now, isPaste, insertedText) {
+  if (isPaste) return "paste-event";
+  if ((currentTool() !== "Human / Unknown" || now - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) && insertedText.length > 20) {
+    return "inline-suggestion";
+  }
+  return "typed";
+}
+
+function detectPaste(insertedText, clipboardText) {
+  const minLength = Number(getCommitConfig("pasteMinLength") || 12);
+  return normalizeWhitespace(insertedText).length >= minLength && normalizeWhitespace(insertedText) === normalizeWhitespace(clipboardText);
 }
 
 function detectProviderFromExtensionId(extensionId) {
@@ -424,16 +478,119 @@ function detectProviderFromExtensionId(extensionId) {
   return "unknown";
 }
 
-function detectPaste(insertedText, clipboardText) {
-  const minLength = Number(getConfig("pasteMinLength") || 12);
-  const normalizedInserted = normalizeWhitespace(insertedText);
-  const normalizedClipboard = normalizeWhitespace(clipboardText);
+function shouldIgnoreDocument(document) {
+  const scheme = String(document?.uri?.scheme || "");
+  const fileName = String(document?.fileName || "");
+  return scheme === "output" || scheme === "extension-output" || fileName.endsWith(".log");
+}
 
-  if (!normalizedInserted || normalizedInserted.length < minLength) {
-    return false;
+function getCommitConfig(key) {
+  return vscode.workspace.getConfiguration("commitConfessional").get(key);
+}
+
+function getNarratorConfig() {
+  const cfg = vscode.workspace.getConfiguration("lcn");
+  return {
+    backendUrl: cfg.get("backendUrl", "http://localhost:8787"),
+    debounceMs: cfg.get("debounceMs", 5000),
+    minChangedLines: cfg.get("minChangedLines", 1),
+    ignoreGlobs: cfg.get("ignoreGlobs", ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.git/**", "**/*.map", "**/*lock*.json"]),
+  };
+}
+
+function isIgnoredByNarrator(filePath, globs) {
+  const normalized = String(filePath || "").replace(/\\/g, "/");
+  return globs.some((glob) => globToRegExp(glob).test(normalized));
+}
+
+function globToRegExp(glob) {
+  let pattern = String(glob || "").replace(/\\/g, "/").replace(/[|{}()[\]^$+?.]/g, "\\$&");
+  pattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+  return new RegExp(`^${pattern}$`, "i");
+}
+
+function createUnifiedDiff(filePath, beforeText, afterText) {
+  const before = splitLines(beforeText);
+  const after = splitLines(afterText);
+  const max = Math.max(before.length, after.length);
+  const lines = [`--- ${filePath}`, `+++ ${filePath}`, `@@ -1,${before.length} +1,${after.length} @@`];
+  for (let i = 0; i < max; i += 1) {
+    if (before[i] === after[i]) {
+      if (before[i] !== undefined) lines.push(` ${before[i]}`);
+      continue;
+    }
+    if (before[i] !== undefined) lines.push(`-${before[i]}`);
+    if (after[i] !== undefined) lines.push(`+${after[i]}`);
   }
+  return lines.join("\n");
+}
 
-  return normalizedInserted === normalizedClipboard;
+function countChangedLines(diff) {
+  return (diff.match(/^\+[^+]/gm) || []).length + (diff.match(/^-[^-]/gm) || []).length;
+}
+
+function splitLines(value) {
+  return value ? String(value).replace(/\r/g, "").split("\n") : [];
+}
+
+function findLatestCopilotLog() {
+  const appData = process.env.APPDATA;
+  if (!appData) return null;
+  const logsRoot = path.join(appData, "Code", "logs");
+  if (!fs.existsSync(logsRoot)) return null;
+  return walkLogFiles(logsRoot).filter((file) => /copilot/i.test(file.fullPath)).sort((a, b) => b.mtimeMs - a.mtimeMs)[0] || null;
+}
+
+function walkLogFiles(root) {
+  const results = [];
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(fullPath);
+      if (entry.isFile() && entry.name.toLowerCase().endsWith(".log")) {
+        try {
+          const stats = fs.statSync(fullPath);
+          results.push({ fullPath, mtimeMs: stats.mtimeMs, size: stats.size });
+        } catch {}
+      }
+    }
+  }
+  return results;
+}
+
+function readNewLogChunk(filePath, offset) {
+  let stats;
+  try { stats = fs.statSync(filePath); } catch { return null; }
+  const start = stats.size < offset ? 0 : offset;
+  if (stats.size === start) return null;
+  const buffer = Buffer.alloc(stats.size - start);
+  const fd = fs.openSync(filePath, "r");
+  try { fs.readSync(fd, buffer, 0, buffer.length, start); } finally { fs.closeSync(fd); }
+  return { nextOffset: stats.size, lines: buffer.toString("utf8").split(/\r?\n/) };
+}
+
+function extractModelHint(line) {
+  for (const pattern of [/claude[- ]?[a-z0-9.]*/i, /gpt[- ]?[0-9a-z.]*/i, /gemini[- ]?[0-9a-z.]*/i, /o[0-9][ -]?[a-z0-9]*/i]) {
+    const match = String(line || "").match(pattern);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+function inferToolFromCopilotLogLine(line) {
+  const value = String(line || "").toLowerCase();
+  if (value.includes("[panel/editagent]")) return "Copilot Chat Edit";
+  if (value.includes("[copilotlanguagemodelwrapper]")) return "Copilot Inline Suggestion";
+  if (value.includes("[title]") || value.includes("[progressmessages]")) return "Copilot Chat";
+  return null;
+}
+
+function appendJsonLine(payload) {
+  try { fs.appendFileSync(LOG_PATH, `${JSON.stringify({ ts: new Date().toISOString(), ...payload })}\n`, "utf8"); } catch {}
 }
 
 function normalizeWhitespace(value) {
@@ -445,298 +602,39 @@ function buildPreview(value) {
   return text.length > 180 ? `${text.slice(0, 177)}...` : text;
 }
 
-async function readClipboardSafe() {
-  try {
-    return await vscode.env.clipboard.readText();
-  } catch (error) {
-    outputChannel.appendLine(`[DEBUG] Clipboard read failed: ${error?.message || String(error)}`);
-    return "";
-  }
-}
-
-function getConfig(key) {
-  return vscode.workspace.getConfiguration("commitConfessional").get(key);
-}
-
-function shouldIgnoreDocument(document) {
-  const fileName = String(document?.fileName || "");
-  const uriString = String(document?.uri?.toString?.() || "");
-  const scheme = String(document?.uri?.scheme || "");
-
-  return (
-    scheme === "output" ||
-    scheme === "extension-output" ||
-    fileName.includes("Commit Confessional") ||
-    uriString.includes("Commit Confessional") ||
-    uriString.includes("extension-output") ||
-    fileName.endsWith(".log")
-  );
-}
-
-async function pollCopilotLogs(initial = false) {
-  const latestLog = findLatestCopilotLog();
-  if (!latestLog) {
-    if (initial) {
-      const appData = process.env.APPDATA;
-      const logsRoot = appData ? path.join(appData, "Code", "logs") : "APPDATA not set";
-      outputChannel.appendLine(`✗ No Copilot log file found. Searched: ${logsRoot}`);
-    }
-    return;
-  }
-
-  if (watchedCopilotLogPath !== latestLog.fullPath) {
-    watchedCopilotLogPath = latestLog.fullPath;
-    watchedCopilotLogSize = 0;
-    seenCopilotLogLines.clear();
-    outputChannel.appendLine(`✓ Watching Copilot log: ${watchedCopilotLogPath} (${latestLog.size} bytes)`);
-  }
-
-  const chunk = readNewLogChunk(watchedCopilotLogPath, watchedCopilotLogSize);
-  if (!chunk) {
-    return;
-  }
-
-  watchedCopilotLogSize = chunk.nextOffset;
-
-  for (const line of chunk.lines) {
-    const normalizedLine = String(line || "").trim();
-    if (!normalizedLine) {
-      continue;
-    }
-
-    const modelHint = extractModelHint(normalizedLine);
-    if (!modelHint) {
-      continue;
-    }
-
-    const dedupeKey = `${watchedCopilotLogPath}|${normalizedLine}`;
-    if (seenCopilotLogLines.has(dedupeKey)) {
-      continue;
-    }
-
-    seenCopilotLogLines.add(dedupeKey);
-    lastCopilotLogActivityAt = Date.now();
-    const inferredTool = inferToolFromCopilotLogLine(normalizedLine);
-    if (inferredTool) {
-      markTool(inferredTool);
-    }
-    outputChannel.appendLine(`✓ [copilot-model] ${modelHint}`);
-    outputChannel.appendLine(normalizedLine);
-    appendJsonLine(vscodeLogPath, {
-      ts: new Date().toISOString(),
-      label: "model-query",
-      source: "copilot-log",
-      provider: "copilot",
-      model: modelHint,
-      rawLine: normalizedLine,
-      logPath: watchedCopilotLogPath,
-    });
-    outputChannel.show(true);
-  }
-}
-
-function findLatestCopilotLog() {
-  const appData = process.env.APPDATA;
-  if (!appData) {
-    return null;
-  }
-
-  const logsRoot = path.join(appData, "Code", "logs");
-  if (!fs.existsSync(logsRoot)) {
-    return null;
-  }
-
-  const files = walkLogFiles(logsRoot);
-  const copilotFiles = files
-    .filter((file) => /copilot/i.test(file.fullPath))
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-  return copilotFiles[0] || null;
-}
-
-function walkLogFiles(root) {
-  const results = [];
-  const stack = [root];
-
-  while (stack.length) {
-    const current = stack.pop();
-    let entries = [];
-
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-
-      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".log")) {
-        continue;
-      }
-
-      try {
-        const stats = fs.statSync(fullPath);
-        results.push({
-          fullPath,
-          mtimeMs: stats.mtimeMs,
-          size: stats.size,
-        });
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  return results;
-}
-
-function readNewLogChunk(filePath, offset) {
-  let stats;
-  try {
-    stats = fs.statSync(filePath);
-  } catch {
-    return null;
-  }
-
-  const start = stats.size < offset ? 0 : offset;
-  if (stats.size === start) {
-    return null;
-  }
-
-  const buffer = Buffer.alloc(stats.size - start);
-  const fd = fs.openSync(filePath, "r");
-
-  try {
-    fs.readSync(fd, buffer, 0, buffer.length, start);
-  } finally {
-    fs.closeSync(fd);
-  }
-
-  return {
-    nextOffset: stats.size,
-    lines: buffer.toString("utf8").split(/\r?\n/),
-  };
-}
-
-function extractModelHint(line) {
-  const patterns = [
-    /claude[- ]?haiku[ -]?[0-9.]*/i,
-    /claude[- ]?sonnet[ -]?[0-9.]*/i,
-    /claude[- ]?opus[ -]?[0-9.]*/i,
-    /gpt[- ]?[0-9a-z.]*/i,
-    /gemini[- ]?[0-9a-z.]*/i,
-    /o[0-9][ -]?[a-z0-9]*/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = line.match(pattern);
-    if (match) {
-      return match[0];
-    }
-  }
-
-  return null;
-}
-
-function classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTrivialInsertion) {
-  if (isPaste) {
-    return "paste-event";
-  }
-
-  if (activeTool !== "Human / Unknown" && isNonTrivialInsertion) {
-    return "inline-suggestion";
-  }
-
-  if (isNonTrivialInsertion && hadRecentCopilotLogActivity(now)) {
-    return "inline-suggestion";
-  }
-
-  return "typed";
-}
-
-function inferToolFromCopilotLogLine(line) {
-  const normalized = String(line || "").toLowerCase();
-
-  if (normalized.includes("[panel/editagent]")) {
-    return "Copilot Chat Edit";
-  }
-
-  if (normalized.includes("[copilotlanguagemodelwrapper]")) {
-    return "Copilot Inline Suggestion";
-  }
-
-  if (normalized.includes("[title]")) {
-    return "Copilot Chat";
-  }
-
-  if (normalized.includes("[progressmessages]")) {
-    return "Copilot Chat";
-  }
-
-  return null;
-}
-
-function hadRecentCopilotLogActivity(now = Date.now()) {
-  return Boolean(lastCopilotLogActivityAt) && now - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS;
-}
-
 function hashContent(value) {
   const normalized = normalizeWhitespace(value);
-  if (!normalized) {
-    return null;
-  }
-
-  return `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}`;
+  return normalized ? `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}` : null;
 }
 
-function appendJsonLine(filePath, payload) {
-  try {
-    fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, "utf8");
-  } catch (error) {
-    outputChannel.appendLine(`Log write failed: ${error?.message || String(error)}`);
-  }
+async function readClipboardSafe() {
+  try { return await vscode.env.clipboard.readText(); } catch { return ""; }
 }
 
-function safeRun(label, action) {
-  try {
-    action();
-  } catch (error) {
-    outputChannel.appendLine(`${label} failed: ${error?.message || String(error)}`);
-  }
+function log(message) {
+  outputChannel?.appendLine(`[${new Date().toISOString()}] ${message}`);
 }
 
-function markTool(name) {
-  pendingTool = name;
-  pendingToolTime = Date.now();
+function trimSlash(value) {
+  return String(value || "").replace(/\/$/, "");
 }
 
-function currentTool() {
-  if (pendingTool && Date.now() - pendingToolTime < TOOL_WINDOW_MS) {
-    return pendingTool;
-  }
-
-  if (hadRecentCopilotLogActivity()) {
-    return "Copilot (log activity)";
-  }
-
-  return "Human / Unknown";
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json();
 }
 
-function clearPendingTool() {
-  pendingTool = null;
-  pendingToolTime = 0;
+function runGit(args, cwd) {
+  return new Promise((resolve, reject) => {
+    execFile("git", args, { cwd, encoding: "utf8" }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
 }
 
-module.exports = {
-  activate,
-  deactivate,
-};
-
-
-//sdfsadfasdfas
-//asdfasdfsafdasdf
+module.exports = { activate, deactivate };

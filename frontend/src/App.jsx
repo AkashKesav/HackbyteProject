@@ -53,6 +53,9 @@ export default function App() {
   }
 
   const latestCapture = dashboard.captures[0];
+  const latestReceipt = dashboard.latestReceipt;
+  const receiptContribution = latestReceipt?.modelEvidence?.contribution ?? null;
+  const receiptCopilot = latestReceipt?.copilotContribution ?? latestReceipt?.modelEvidence?.copilotContribution ?? null;
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(21,128,61,0.24),_transparent_32%),linear-gradient(135deg,_#0c0a09,_#1c1917_48%,_#0f172a)] text-stone-100">
@@ -118,6 +121,24 @@ export default function App() {
                 details={[
                   `Author: ${dashboard.latestCommit.authorName ?? "unknown"}`,
                   `Classification: ${dashboard.latestCommit.classification}`,
+                ]}
+              />
+              <StatusCard
+                title="AI contribution"
+                value={
+                  receiptContribution
+                    ? `${receiptContribution.estimatedAiPercentage}% AI`
+                    : "No receipt yet"
+                }
+                accent="text-emerald-300"
+                details={[
+                  receiptCopilot
+                    ? `Copilot: ${receiptCopilot.estimatedAiPercentage}%`
+                    : "Copilot: no receipt yet",
+                  latestReceipt?.modelEvidence?.method
+                    ? `Method: ${latestReceipt.modelEvidence.method}`
+                    : "Method: waiting for first commit receipt",
+                  latestReceipt?.updatedAt ? `Updated: ${latestReceipt.updatedAt}` : "Run a commit to populate this",
                 ]}
               />
             </div>
@@ -206,9 +227,53 @@ export default function App() {
           <div className="grid gap-6">
             <Panel title="Analysis summary">
               <MetricRow label="AI-related captures" value={String(dashboard.analytics.aiAssistedCommits)} />
+              <MetricRow
+                label="Latest commit AI"
+                value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"}
+              />
+              <MetricRow
+                label="Latest commit Copilot"
+                value={receiptCopilot ? `${receiptCopilot.estimatedAiPercentage}%` : "--"}
+              />
               {dashboard.analytics.vulnerabilities.map((item) => (
                 <MetricRow key={item.severity} label={`${item.severity} findings`} value={String(item.count)} />
               ))}
+            </Panel>
+
+            <Panel title="Latest commit receipt">
+              {latestReceipt ? (
+                <>
+                  <MetricRow
+                    label="Confidence"
+                    value={latestReceipt.modelEvidence?.certainty ?? "NONE"}
+                  />
+                  <MetricRow
+                    label="Matched lines"
+                    value={
+                      receiptContribution
+                        ? `${receiptContribution.aiMatchedLines}/${receiptContribution.totalChangedLines}`
+                        : "0/0"
+                    }
+                  />
+                  <div className="space-y-2 text-sm text-stone-300">
+                    {(latestReceipt.modelEvidence?.evidence ?? []).length === 0 ? (
+                      <div className="rounded-2xl bg-white/5 px-4 py-3 text-stone-400">
+                        No commit evidence yet.
+                      </div>
+                    ) : (
+                      latestReceipt.modelEvidence.evidence.map((item) => (
+                        <div key={item} className="rounded-2xl bg-white/5 px-4 py-3">
+                          {item}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-stone-400">
+                  No commit receipt yet. Commit once while the backend is running and the dashboard will show the percentage here.
+                </p>
+              )}
             </Panel>
 
             <Panel title="Contributors">

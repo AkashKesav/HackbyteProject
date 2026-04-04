@@ -1,0 +1,12 @@
+{
+  "sessionId": "local-demo-session",
+  "author": "demo-user",
+  "filePath": "src/features/auth/login.ts",
+  "language": "typescript",
+  "diff": "*** Begin Patch\n*** Update File: src/features/auth/login.ts\n@@\n-export async function login(email: string, password: string) {\n-  return api.post('/login', { email, password });\n-}\n+export async function login(email: string, password: string) {\n+  const normalizedEmail = email.trim().toLowerCase();\n+\n+  return api.post('/login', {\n+    email: normalizedEmail,\n+    password\n+  });\n+}\n*** End Patch",
+  "context": "import { api } from '../api/client';\n\nexport async function login(email: string, password: string) {\n  const normalizedEmail = email.trim().toLowerCase();\n\n  return api.post('/login', {\n    email: normalizedEmail,\n    password\n  });\n}\n",
+  "changedLines": 7,
+  "source": "vscode",
+  "repo": "living-codebase-narrator",
+  "branch": "local-demo"
+}

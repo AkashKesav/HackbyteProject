@@ -1,7 +1,7 @@
 {
-  "name": "commit-confessional-vscode-detector",
-  "displayName": "Commit Confessional VS Code Detector",
-  "description": "Logs paste events and heuristic AI extension activation events to VS Code output and a local backend.",
+  "name": "hackbyte-code-narrator",
+  "displayName": "Hackbyte Code Narrator",
+  "description": "Combines Commit Confessional background detection with Living Codebase Narrator live docs UI.",
   "version": "0.1.0",
   "publisher": "local",
   "engines": {
@@ -15,6 +15,24 @@
   ],
   "main": "./extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lcn",
+          "title": "Narrator",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lcn": [
+        {
+          "type": "webview",
+          "id": "lcn.sidebar",
+          "name": "Live Docs"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "commitConfessional.showOutput",
@@ -31,10 +49,18 @@
       {
         "command": "commitConfessional.debugStatus",
         "title": "Commit Confessional: Debug Status Report"
+      },
+      {
+        "command": "lcn.pingBackend",
+        "title": "LCN: Ping Backend"
+      },
+      {
+        "command": "lcn.showLog",
+        "title": "LCN: Show Output Log"
       }
     ],
     "configuration": {
-      "title": "Commit Confessional",
+      "title": "Hackbyte Code Narrator",
       "properties": {
         "commitConfessional.backendUrl": {
           "type": "string",
@@ -64,6 +90,42 @@
           "type": "number",
           "default": 12,
           "description": "Minimum inserted text length before a clipboard match is treated as a paste event."
+        },
+        "lcn.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8787",
+          "description": "Narrator backend base URL."
+        },
+        "lcn.debounceMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 250,
+          "description": "Debounce window after saves before emitting a narrator delta."
+        },
+        "lcn.minChangedLines": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "Skip edits with fewer changed lines than this threshold for narrator events."
+        },
+        "lcn.ignoreGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/.next/**",
+            "**/.git/**",
+            "**/*.map",
+            "**/*lock*.json",
+            "**/package-lock.json",
+            "**/pnpm-lock.yaml",
+            "**/yarn.lock"
+          ],
+          "description": "Glob patterns ignored by the narrator save pipeline."
         }
       }
     }

@@ -18,6 +18,7 @@ const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "../..");
 const dataDir = path.resolve(projectRoot, "backend/data");
 const eventLogPath = path.join(dataDir, "proxy-events.json");
+const receiptLogPath = path.join(dataDir, "latest-receipt.json");
 const mitmCaDir = path.join(dataDir, ".http-mitm-proxy");
 const PORT = Number(process.env.PORT || 4000);
 const SIM_PROXY_PORT = Number(process.env.SIM_PROXY_PORT || 8877);
@@ -46,6 +47,7 @@ const state = {
   repoContextUpdatedAt: Date.now(),
   latestCommit: await createLatestCommitSnapshot(projectRoot),
   captures: await loadStoredCaptures(),
+  latestReceipt: await loadStoredReceipt(),
 };
 
 state.proxy.totalEvents = state.captures.length;
@@ -78,6 +80,7 @@ app.get("/api/health", async (_req, res) => {
     },
     repo: state.repoContext.summary,
     latestCommit: state.latestCommit,
+    latestReceipt: state.latestReceipt,
     captureCount: state.captures.length,
   });
 });
@@ -105,6 +108,7 @@ app.get("/api/proxy/status", async (_req, res) => {
     },
     repo: state.repoContext.summary,
     latestCommit: state.latestCommit,
+    latestReceipt: state.latestReceipt,
     captures: state.captures,
     analytics: {
       contributors: buildContributorSummary(state.captures),
@@ -157,6 +161,7 @@ app.get("/api/dashboard", async (_req, res) => {
     proxy: state.proxy,
     repo: state.repoContext.summary,
     latestCommit: state.latestCommit,
+    latestReceipt: state.latestReceipt,
     captures: state.captures,
     analytics: {
       contributors: buildContributorSummary(state.captures),
@@ -263,9 +268,15 @@ app.post("/api/extension/events", async (req, res) => {
 
 app.post("/api/receipt", async (req, res) => {
   const receipt = await buildModelEvidenceReceipt(req.body ?? {});
+  state.latestReceipt = {
+    ...receipt,
+    updatedAt: new Date().toISOString(),
+    commitHash: req.body?.commitHash || null,
+  };
+  await persistReceipt(state.latestReceipt);
   res.status(201).json({
     ok: true,
-    ...receipt,
+    ...state.latestReceipt,
   });
 });
 
@@ -310,6 +321,24 @@ async function loadStoredCaptures() {
 
 async function persistCaptures(captures) {
   await fs.writeFile(eventLogPath, JSON.stringify(captures, null, 2));
+}
+
+async function loadStoredReceipt() {
+  try {
+    const raw = await fs.readFile(receiptLogPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    console.warn("Failed to load latest receipt", error);
+    return null;
+  }
+}
+
+async function persistReceipt(receipt) {
+  await fs.writeFile(receiptLogPath, JSON.stringify(receipt, null, 2));
 }
 
 async function captureProxyEvent(input, source) {

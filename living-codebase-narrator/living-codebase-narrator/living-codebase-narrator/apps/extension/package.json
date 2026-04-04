@@ -1,0 +1,108 @@
+{
+  "name": "living-codebase-narrator-extension",
+  "displayName": "Living Codebase Narrator",
+  "description": "Documentation that writes itself as you code.",
+  "version": "0.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:lcn.sidebar",
+    "onCommand:lcn.pingBackend",
+    "onCommand:lcn.showLog"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lcn",
+          "title": "Narrator",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lcn": [
+        {
+          "type": "webview",
+          "id": "lcn.sidebar",
+          "name": "Living Docs"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "lcn.pingBackend",
+        "title": "LCN: Ping Backend"
+      },
+      {
+        "command": "lcn.showLog",
+        "title": "LCN: Show Output Log"
+      }
+    ],
+    "configuration": {
+      "title": "Living Codebase Narrator",
+      "properties": {
+        "lcn.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8787",
+          "description": "Backend base URL."
+        },
+        "lcn.debounceMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 250,
+          "description": "Debounce window after saves before emitting a delta."
+        },
+        "lcn.minChangedLines": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "Skip edits with fewer changed lines than this threshold."
+        },
+        "lcn.ignoreGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/.next/**",
+            "**/.git/**",
+            "**/*.map",
+            "**/*lock*.json",
+            "**/package-lock.json",
+            "**/pnpm-lock.yaml",
+            "**/yarn.lock"
+          ],
+          "description": "Glob patterns ignored by the narrator."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "dev": "node ./scripts/build.mjs",
+    "watch": "node ./scripts/watch.mjs",
+    "build": "npm run dev",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@lcn/types": "file:../../packages/types",
+    "diff": "^5.2.0",
+    "minimatch": "^10.0.1",
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "@types/diff": "^5.2.0",
+    "@types/minimatch": "^5.1.2",
+    "@types/node": "^20.14.12",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.6.3"
+  }
+}
+
