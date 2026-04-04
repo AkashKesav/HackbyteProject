@@ -12,6 +12,7 @@ import {
   createRecentCommitSnapshots,
   summarizeEventForStorage,
 } from "./services/repoContext.js";
+import { getAiDetectorPath, recordCommitInAiDetector } from "./services/aiDetectorStore.js";
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
 import { buildModelEvidenceReceipt } from "./services/modelEvidence.js";
 import { enrichReceiptWithIntegrations } from "./services/receiptIntegrations.js";
@@ -35,6 +36,7 @@ let FRONTEND_URL = "http://localhost:5173";
 let GITHUB_CLIENT_ID = "";
 let GITHUB_CLIENT_SECRET = "";
 let GITHUB_OAUTH_CALLBACK_URL = `http://localhost:${PORT}/api/github/callback`;
+let GITHUB_SEND_EXPLICIT_REDIRECT_URI = false;
 const GITHUB_STATE_TTL_MS = 10 * 60 * 1000;
 
 await loadEnvFiles();
@@ -42,6 +44,7 @@ FRONTEND_URL = process.env.FRONTEND_URL || FRONTEND_URL;
 GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
 GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
 GITHUB_OAUTH_CALLBACK_URL = process.env.GITHUB_OAUTH_CALLBACK_URL || GITHUB_OAUTH_CALLBACK_URL;
+GITHUB_SEND_EXPLICIT_REDIRECT_URI = process.env.GITHUB_OAUTH_SEND_REDIRECT_URI === "true";
 
 const app = express();
 app.use(cors());
@@ -302,7 +305,10 @@ app.post("/api/extension/events", async (req, res) => {
 });
 
 app.post("/api/receipt", async (req, res) => {
-  const receipt = await buildModelEvidenceReceipt(req.body ?? {});
+  const receipt = await buildModelEvidenceReceipt({
+    ...(req.body ?? {}),
+    aiDetectorPath: getAiDetectorPath(projectRoot),
+  });
   const enrichedReceipt = await enrichReceiptWithIntegrations(projectRoot, receipt);
   state.latestReceipt = {
     ...enrichedReceipt,
@@ -312,6 +318,7 @@ app.post("/api/receipt", async (req, res) => {
   state.receiptHistory = upsertReceiptHistory(state.receiptHistory, state.latestReceipt);
   await persistReceipt(state.latestReceipt);
   await persistReceiptHistory(state.receiptHistory);
+  await recordCommitInAiDetector(projectRoot, state.latestReceipt, req.body?.diffText || "");
   res.status(201).json({
     ok: true,
     ...state.latestReceipt,
@@ -325,7 +332,7 @@ app.get("/api/github/status", (_req, res) => {
   });
 });
 
-app.post("/api/github/connect", (_req, res) => {
+app.post("/api/github/connect", (req, res) => {
   if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
     return res.status(400).json({
       ok: false,
@@ -336,11 +343,16 @@ app.post("/api/github/connect", (_req, res) => {
 
   const stateToken = crypto.randomBytes(24).toString("hex");
   cleanupGithubStates();
-  state.githubStates.set(stateToken, Date.now() + GITHUB_STATE_TTL_MS);
+  state.githubStates.set(stateToken, {
+    expiresAt: Date.now() + GITHUB_STATE_TTL_MS,
+    returnPath: normalizeFrontendReturnPath(req.body?.returnPath || "/github-login"),
+  });
 
   const authorizationUrl = new URL("https://github.com/login/oauth/authorize");
   authorizationUrl.searchParams.set("client_id", GITHUB_CLIENT_ID);
-  authorizationUrl.searchParams.set("redirect_uri", GITHUB_OAUTH_CALLBACK_URL);
+  if (shouldSendExplicitGithubRedirectUri()) {
+    authorizationUrl.searchParams.set("redirect_uri", GITHUB_OAUTH_CALLBACK_URL);
+  }
   authorizationUrl.searchParams.set("scope", "read:user user:email repo");
   authorizationUrl.searchParams.set("state", stateToken);
 
@@ -354,31 +366,37 @@ app.post("/api/github/connect", (_req, res) => {
 app.get("/api/github/callback", async (req, res) => {
   const { code, state: stateToken } = req.query;
   cleanupGithubStates();
-  const hasState = typeof stateToken === "string" && state.githubStates.has(stateToken);
+  const githubState = typeof stateToken === "string" ? state.githubStates.get(stateToken) : null;
+  const hasState = Boolean(githubState);
+  const returnPath = normalizeFrontendReturnPath(githubState?.returnPath || "/github-login");
 
   if (!code || !stateToken || !hasState) {
-    return res.redirect(`${FRONTEND_URL}?github=error&reason=state`);
+    return res.redirect(buildFrontendRedirectUrl(returnPath, "error", "state"));
   }
   state.githubStates.delete(stateToken);
 
   if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-    return res.redirect(`${FRONTEND_URL}?github=error&reason=config`);
+    return res.redirect(buildFrontendRedirectUrl(returnPath, "error", "config"));
   }
 
   try {
+    const tokenPayloadRequest = {
+      client_id: GITHUB_CLIENT_ID,
+      client_secret: GITHUB_CLIENT_SECRET,
+      code,
+      state: stateToken,
+    };
+    if (shouldSendExplicitGithubRedirectUri()) {
+      tokenPayloadRequest.redirect_uri = GITHUB_OAUTH_CALLBACK_URL;
+    }
+
     const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-        redirect_uri: GITHUB_OAUTH_CALLBACK_URL,
-        state: stateToken,
-      }),
+      body: JSON.stringify(tokenPayloadRequest),
     });
 
     const tokenPayload = await tokenResponse.json();
@@ -423,11 +441,9 @@ app.get("/api/github/callback", async (req, res) => {
       },
     };
     await persistGithubSession(state.github);
-    return res.redirect(`${FRONTEND_URL}/?github=connected`);
+    return res.redirect(buildFrontendRedirectUrl(returnPath, "connected"));
   } catch (error) {
-    return res.redirect(
-      `${FRONTEND_URL}/?github=error&reason=${encodeURIComponent(error?.message || String(error))}`
-    );
+    return res.redirect(buildFrontendRedirectUrl(returnPath, "error", error?.message || String(error)));
   }
 });
 
@@ -715,11 +731,34 @@ function normalizeCommitHash(value) {
 
 function cleanupGithubStates() {
   const now = Date.now();
-  for (const [token, expiresAt] of state.githubStates.entries()) {
+  for (const [token, value] of state.githubStates.entries()) {
+    const expiresAt = typeof value === "number" ? value : value?.expiresAt;
     if (expiresAt <= now) {
       state.githubStates.delete(token);
     }
   }
+}
+
+function shouldSendExplicitGithubRedirectUri() {
+  return GITHUB_SEND_EXPLICIT_REDIRECT_URI && Boolean(GITHUB_OAUTH_CALLBACK_URL);
+}
+
+function normalizeFrontendReturnPath(value) {
+  const pathValue = String(value || "/github-login").trim();
+  if (!pathValue.startsWith("/") || pathValue.startsWith("//")) {
+    return "/github-login";
+  }
+  return pathValue;
+}
+
+function buildFrontendRedirectUrl(returnPath, githubStatus, reason) {
+  const url = new URL(FRONTEND_URL);
+  url.pathname = normalizeFrontendReturnPath(returnPath);
+  url.searchParams.set("github", githubStatus);
+  if (reason) {
+    url.searchParams.set("reason", String(reason));
+  }
+  return url.toString();
 }
 
 async function loadEnvFiles() {
@@ -744,9 +783,7 @@ async function loadEnvFiles() {
         }
         const key = line.slice(0, separator).trim();
         const value = line.slice(separator + 1).trim();
-        if (!(key in process.env)) {
-          process.env[key] = value;
-        }
+        process.env[key] = value;
       }
     } catch (error) {
       if (error.code !== "ENOENT") {

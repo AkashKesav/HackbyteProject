@@ -1,20 +1,32 @@
 const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const backendUrl = process.env.COMMIT_CONFESSIONAL_RECEIPT_URL || "http://127.0.0.1:4000/api/receipt";
+const UNTRACKED_PREVIEW_MAX_BYTES = 256 * 1024;
 
 async function main() {
-  const stagedDiff = execGit(["diff", "--cached", "--unified=0"]);
-  const workingDiff = execGit(["diff", "--unified=0"]);
-  const diffText = [stagedDiff, workingDiff].filter(Boolean).join("\n");
+  const repoRoot = process.cwd();
+  const targetPath = resolveRequestedFile(repoRoot, process.argv.slice(2));
+  const diffText = buildPreviewDiff(repoRoot, targetPath);
 
   if (!diffText.trim()) {
-    console.log("No staged or working-tree diff found.");
+    console.log(
+      targetPath
+        ? `No staged or working-tree diff found for ${targetPath}.`
+        : "No staged or working-tree diff found."
+    );
     return;
+  }
+
+  if (targetPath) {
+    console.log(`Preview scope: file=${targetPath}`);
   }
 
   const payload = {
     diffText,
     receiptUrl: "preview://working-tree",
+    targetPath: targetPath || null,
   };
 
   try {
@@ -62,11 +74,172 @@ async function main() {
   }
 }
 
-function execGit(args) {
+function execGit(args, cwd = process.cwd()) {
   return execFileSync("git", args, {
-    cwd: process.cwd(),
+    cwd,
     encoding: "utf8",
   });
 }
 
-main();
+function buildPreviewDiff(repoRoot, targetPath = null) {
+  const diffArgs = targetPath ? ["--", targetPath] : [];
+  const stagedDiff = execGit(["diff", "--cached", "--unified=0", ...diffArgs], repoRoot);
+  const workingDiff = execGit(["diff", "--unified=0", ...diffArgs], repoRoot);
+  const untrackedDiffs = readUntrackedFileDiffs(repoRoot, targetPath ? [targetPath] : null);
+  return [stagedDiff, workingDiff, ...untrackedDiffs].filter(Boolean).join("\n");
+}
+
+function readUntrackedFileDiffs(repoRoot, onlyPaths = null) {
+  const output = execGit(["ls-files", "--others", "--exclude-standard"], repoRoot);
+  const filePaths = output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const filterPaths = onlyPaths ? new Set(onlyPaths.map(normalizeRepoPath)) : null;
+  const diffs = [];
+
+  for (const relativePath of filePaths) {
+    const normalizedPath = normalizeRepoPath(relativePath);
+    if (filterPaths && !filterPaths.has(normalizedPath)) {
+      continue;
+    }
+
+    const fullPath = path.join(repoRoot, relativePath);
+    let stats;
+    try {
+      stats = fs.statSync(fullPath);
+    } catch {
+      continue;
+    }
+
+    if (!stats.isFile() || stats.size > UNTRACKED_PREVIEW_MAX_BYTES) {
+      continue;
+    }
+
+    let content = "";
+    try {
+      content = fs.readFileSync(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    if (content.includes("\u0000")) {
+      continue;
+    }
+
+    diffs.push(createUntrackedFileDiff(normalizedPath, content));
+  }
+
+  return diffs;
+}
+
+function createUntrackedFileDiff(filePath, content) {
+  const normalizedPath = normalizeRepoPath(filePath);
+  const lines = String(content || "").replace(/\r/g, "").split("\n");
+  return [
+    `diff --git a/${normalizedPath} b/${normalizedPath}`,
+    "new file mode 100644",
+    "--- /dev/null",
+    `+++ b/${normalizedPath}`,
+    `@@ -0,0 +1,${lines.length} @@`,
+    ...lines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+function resolveRequestedFile(repoRoot, args) {
+  if (!Array.isArray(args) || args.length === 0) {
+    return null;
+  }
+
+  if (args.length > 1) {
+    throw new Error("Pass only one file path or file name. Quote the path if it contains spaces.");
+  }
+
+  const request = String(args[0] || "").trim();
+  if (!request) {
+    return null;
+  }
+
+  if (request === "--help" || request === "-h") {
+    printUsage();
+    process.exit(0);
+  }
+
+  const exactPath = resolveExactFileTarget(repoRoot, request);
+  if (exactPath) {
+    return exactPath;
+  }
+
+  const repoFiles = listRepoFiles(repoRoot);
+  const normalizedRequest = normalizeRepoPath(request).toLowerCase();
+  const exactRepoMatch = repoFiles.find((filePath) => filePath.toLowerCase() === normalizedRequest);
+  if (exactRepoMatch) {
+    return exactRepoMatch;
+  }
+
+  if (request.includes("/") || request.includes("\\") || path.isAbsolute(request)) {
+    throw new Error(`Could not find "${request}" in this repository.`);
+  }
+
+  const baseName = path.basename(request).toLowerCase();
+  const baseNameMatches = repoFiles.filter((filePath) => path.basename(filePath).toLowerCase() === baseName);
+
+  if (baseNameMatches.length === 1) {
+    return baseNameMatches[0];
+  }
+
+  if (baseNameMatches.length > 1) {
+    throw new Error(
+      `File name "${request}" is ambiguous. Use one of: ${baseNameMatches.join(", ")}`
+    );
+  }
+
+  throw new Error(`Could not find "${request}" in this repository.`);
+}
+
+function resolveExactFileTarget(repoRoot, request) {
+  const candidatePath = path.resolve(repoRoot, request);
+  if (!isFileWithinRepo(repoRoot, candidatePath)) {
+    return null;
+  }
+  return normalizeRepoPath(path.relative(repoRoot, candidatePath));
+}
+
+function isFileWithinRepo(repoRoot, candidatePath) {
+  try {
+    const stats = fs.statSync(candidatePath);
+    if (!stats.isFile()) {
+      return false;
+    }
+
+    const relativePath = path.relative(repoRoot, candidatePath);
+    return Boolean(relativePath) && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+  } catch {
+    return false;
+  }
+}
+
+function listRepoFiles(repoRoot) {
+  const output = execGit(["ls-files", "--cached", "--others", "--exclude-standard"], repoRoot);
+  return [...new Set(output.split(/\r?\n/).map((value) => normalizeRepoPath(value)).filter(Boolean))];
+}
+
+function normalizeRepoPath(value) {
+  return String(value || "").replace(/\\/g, "/").replace(/^\.\/+/, "");
+}
+
+function printUsage() {
+  console.log("Usage: node scripts/preview-receipt.js [file-path-or-file-name]");
+  console.log("Examples:");
+  console.log("  node scripts/preview-receipt.js");
+  console.log("  node scripts/preview-receipt.js backend/src/server.js");
+  console.log("  node scripts/preview-receipt.js demo-vulnerabilities.js");
+}
+
+if (require.main === module) {
+  void main();
+}
+
+module.exports = {
+  buildPreviewDiff,
+  listRepoFiles,
+  normalizeRepoPath,
+  resolveRequestedFile,
+};

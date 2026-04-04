@@ -7,6 +7,8 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [githubMessage, setGithubMessage] = useState("");
+  const currentPath = window.location.pathname;
+  const isGithubLoginPage = currentPath === "/github-login";
 
   async function loadDashboard() {
     const response = await fetch(`${API_BASE}/api/dashboard`);
@@ -41,10 +43,14 @@ export default function App() {
     void loadDashboard();
   }, []);
 
-  async function connectGithub() {
+  async function connectGithub(returnPath = currentPath || "/github-login") {
     setConnecting(true);
     try {
-      const response = await fetch(`${API_BASE}/api/github/connect`, { method: "POST" });
+      const response = await fetch(`${API_BASE}/api/github/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ returnPath }),
+      });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data?.message || "GitHub OAuth is not configured.");
@@ -95,6 +101,19 @@ export default function App() {
   const repoName = dashboard.repo.fullName || dashboard.repo.repoName || "unknown-repo";
   const connectedLabel = github?.connected ? github.user?.login || "connected" : "not connected";
 
+  if (isGithubLoginPage) {
+    return (
+      <GithubLoginPage
+        repoName={repoName}
+        github={github}
+        githubMessage={githubMessage}
+        connecting={connecting}
+        onConnect={() => connectGithub("/github-login")}
+        onDisconnect={disconnectGithub}
+      />
+    );
+  }
+
   return (
     <main className="min-h-screen bg-[#0b0d12] text-[#edf0fa]">
       <TopBar repoName={repoName} connectedLabel={connectedLabel} githubConnected={github?.connected} />
@@ -141,6 +160,7 @@ export default function App() {
                   <ActionButton onClick={connectGithub} disabled={connecting} active>
                     {connecting ? "Connecting..." : github?.connected ? "Reconnect GitHub" : "Connect GitHub"}
                   </ActionButton>
+                  <ActionLink href="/github-login">GitHub login page</ActionLink>
                   {github?.connected ? <ActionButton onClick={disconnectGithub}>Disconnect</ActionButton> : null}
                   <ActionButton onClick={() => simulate("openai")} disabled={simulating}>
                     {simulating ? "Simulating..." : "Simulate proxy event"}
@@ -248,6 +268,10 @@ export default function App() {
                       value={receiptContribution ? `${receiptContribution.aiMatchedLines}/${receiptContribution.totalChangedLines}` : "0/0"}
                     />
                     <MetricRow label="Confidence" value={latestReceipt.modelEvidence?.certainty ?? "NONE"} />
+                    <MetricRow
+                      label="Semgrep findings"
+                      value={latestReceipt.semgrep?.available ? String(latestReceipt.semgrep?.findingCount || 0) : latestReceipt.semgrep?.error || "unavailable"}
+                    />
                     <div className="space-y-2">
                       {(latestReceipt.modelEvidence?.evidence ?? []).length === 0 ? (
                         <EmptyState text="No evidence text was produced for the latest receipt." compact />
@@ -259,6 +283,25 @@ export default function App() {
                         ))
                       )}
                     </div>
+                    {(latestReceipt.semgrep?.findings ?? []).length > 0 ? (
+                      <div className="space-y-2">
+                        {latestReceipt.semgrep.findings.slice(0, 5).map((finding) => (
+                          <div
+                            key={`${finding.rule}-${finding.path}-${finding.line}`}
+                            className="rounded-xl border border-[#252c3e] bg-[#181d28] px-4 py-3 text-sm text-[#c7d1eb]"
+                          >
+                            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#4a5578]">
+                              {finding.severity} | {finding.rule}
+                            </div>
+                            <div className="mt-1 text-[#edf0fa]">{finding.message}</div>
+                            <div className="mt-1 text-xs text-[#8492b4]">
+                              {finding.path}
+                              {finding.line ? `:${finding.line}` : ""}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <EmptyState text="No commit receipt yet. Make a commit while the extension and backend are running." compact />
@@ -283,7 +326,10 @@ export default function App() {
                     ) : null}
                   </div>
                 ) : (
-                  <EmptyState text="GitHub is not connected yet. Use the connect action to pull repo commits into the dashboard." compact />
+                  <div className="space-y-3">
+                    <EmptyState text="GitHub is not connected yet. Use the login page to reconnect and pull repo commits into the dashboard." compact />
+                    <ActionLink href="/github-login">Open GitHub login page</ActionLink>
+                  </div>
                 )}
               </Panel>
             </div>
@@ -393,6 +439,87 @@ export default function App() {
   );
 }
 
+function GithubLoginPage({ repoName, github, githubMessage, connecting, onConnect, onDisconnect }) {
+  const connected = Boolean(github?.connected);
+
+  return (
+    <main className="min-h-screen bg-[#0b0d12] text-[#edf0fa]">
+      <TopBar repoName={repoName} connectedLabel={connected ? github.user?.login || "connected" : "not connected"} githubConnected={connected} />
+
+      <div className="mx-auto flex min-h-[calc(100vh-52px)] max-w-6xl items-center px-4 py-8 md:px-6">
+        <div className="grid w-full gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+          <section className="rounded-3xl border border-[#252c3e] bg-[#11141c] p-6 shadow-[0_20px_60px_rgba(0,0,0,0.28)]">
+            <div className="font-mono text-[10px] uppercase tracking-[0.24em] text-[#4a5578]">GitHub Access</div>
+            <h1 className="mt-3 font-mono text-3xl font-bold tracking-tight text-[#edf0fa] md:text-4xl">
+              Connect GitHub before you sync commit history.
+            </h1>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-[#8492b4]">
+              This page keeps the OAuth flow separate from the dashboard so reconnecting is simpler and the callback can return to one stable place.
+            </p>
+
+            {githubMessage ? (
+              <div className="mt-5 rounded-xl border border-[#313a54] bg-[#181d28] px-4 py-3 text-sm text-[#c7d1eb]">
+                {githubMessage}
+              </div>
+            ) : null}
+
+            <div className="mt-6 flex flex-wrap gap-3">
+              <ActionButton onClick={onConnect} disabled={connecting} active>
+                {connecting ? "Connecting..." : connected ? "Reconnect GitHub" : "Connect GitHub"}
+              </ActionButton>
+              {connected ? <ActionButton onClick={onDisconnect}>Disconnect</ActionButton> : null}
+              <ActionLink href="/">Back to dashboard</ActionLink>
+            </div>
+
+            <div className="mt-6 grid gap-3 md:grid-cols-3">
+              <StatCard
+                label="Status"
+                value={connected ? "Connected" : "Offline"}
+                sub={connected ? github.user?.login || "linked" : "oauth required"}
+                tone={connected ? "text-[#1fc86b]" : "text-[#f5a623]"}
+              />
+              <StatCard
+                label="Scope"
+                value="repo"
+                sub="read:user user:email repo"
+                tone="text-[#4d8eff]"
+              />
+              <StatCard
+                label="Callback"
+                value="local"
+                sub="handled by backend"
+                tone="text-[#c7d1eb]"
+              />
+            </div>
+          </section>
+
+          <div className="grid gap-4">
+            <Panel title="Connection status" subtitle="Current OAuth state from the backend.">
+              <MetricRow label="Connected" value={connected ? "yes" : "no"} />
+              <MetricRow label="Login" value={github?.user?.login ?? "--"} />
+              <MetricRow label="Name" value={github?.user?.name ?? "--"} />
+              <MetricRow label="Connected at" value={formatDateTime(github?.connectedAt)} />
+              <MetricRow label="Profile" value={github?.user?.profileUrl ?? "not linked"} />
+            </Panel>
+
+            <Panel title="What this unlocks" subtitle="Why the dashboard asks for GitHub access.">
+              <ListPill>Loads recent repository commits into the dashboard feed.</ListPill>
+              <ListPill>Keeps commit metadata aligned with local AI receipts.</ListPill>
+              <ListPill>Lets the app show linked profile details instead of local-only mode.</ListPill>
+            </Panel>
+
+            <Panel title="Troubleshooting" subtitle="If GitHub refuses the callback again.">
+              <ListPill>The backend now avoids sending an explicit <code className="rounded bg-[#11141c] px-1.5 py-0.5 text-[#edf0fa]">redirect_uri</code> unless explicitly enabled.</ListPill>
+              <ListPill>Restart the backend once so the updated OAuth logic is picked up.</ListPill>
+              <ListPill>If the GitHub app still rejects login, its registered callback in GitHub settings needs to match the local backend callback.</ListPill>
+            </Panel>
+          </div>
+        </div>
+      </div>
+    </main>
+  );
+}
+
 function TopBar({ repoName, connectedLabel, githubConnected }) {
   return (
     <header className="sticky top-0 z-20 flex h-[52px] items-center gap-4 border-b border-[#252c3e] bg-[#11141c] px-4 md:px-6">
@@ -455,6 +582,17 @@ function ActionButton({ children, active = false, ...props }) {
           : "border-[#313a54] bg-[#1f2535] text-[#c7d1eb] hover:border-[#4d8eff]/30 hover:text-[#edf0fa]"
       }`}
     />
+  );
+}
+
+function ActionLink({ children, href }) {
+  return (
+    <a
+      href={href}
+      className="inline-flex rounded-lg border border-[#313a54] bg-[#1f2535] px-4 py-2 font-mono text-[11px] text-[#c7d1eb] transition hover:border-[#4d8eff]/30 hover:text-[#edf0fa]"
+    >
+      {children}
+    </a>
   );
 }
 

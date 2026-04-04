@@ -27,6 +27,11 @@ const LOG_PATH = path.join(os.homedir(), ".cc-vscode-log.jsonl"); // Local event
 const TOOL_WINDOW_MS = 3000; // Time window to identify recent tool usage
 const COPILOT_LOG_WINDOW_MS = 8000; // Time window for Copilot log activity detection
 const DEFAULT_SESSION_ID = "local-dev"; // Default session identifier
+const AI_TAG_WINDOW_MS = 15 * 60 * 1000; // Keep recent AI insertions for tag propagation
+const AI_DETECTOR_FILE = ".aidetector.json"; // Persistent store for file AI lineage
+const AI_DETECTOR_VERSION = 1;
+const REPO_DISCOVERY_MAX_DEPTH = 2;
+const UNTRACKED_PREVIEW_MAX_BYTES = 256 * 1024;
 // Map of VS Code command IDs to user-friendly tool names
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
@@ -49,6 +54,7 @@ let copilotLogTimer; // Timer for polling Copilot logs
 let pendingTool = null; // Most recently detected AI tool
 let pendingToolTime = 0; // Timestamp of last tool detection
 let lastCopilotLogActivityAt = 0; // Timestamp of last Copilot log activity
+let lastDetectedModel = null; // Latest model name seen in Copilot logs
 let lastPromptContext = null; // Recent user input context (paste/suggestion)
 let watchedCopilotLogPath = null; // Path to currently monitored Copilot log file
 let watchedCopilotLogSize = 0; // Current read position in Copilot log
@@ -60,6 +66,7 @@ const seenCopilotLogLines = new Set(); // Prevent duplicate log line processing
 const narratorSnapshots = new Map(); // Store previous file content for diff generation
 const narratorPending = new Map(); // Queue pending narrator delta documents
 const repoHeads = new Map(); // Track git HEAD for each repository
+const pendingAiInsertions = new Map(); // Recent AI-origin insertions keyed by file path
 
 // === Sidebar UI Provider ===
 // Manages the webview sidebar that displays live code documentation and narrator snapshots
@@ -317,14 +324,14 @@ function registerCommands(context) {
     outputChannel.show(true);
   }));
   context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.testLatestReceipt", async () => {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) {
-      void vscode.window.showErrorMessage("No workspace folder is open.");
+    const repoRoot = getPreferredRepoRoot();
+    if (!repoRoot) {
+      void vscode.window.showErrorMessage("No git repository was found in the current workspace.");
       return;
     }
 
     try {
-      await publishReceiptForRepo(folder.uri.fsPath, true);
+      await publishReceiptForRepo(repoRoot, true);
       outputChannel.show(true);
       void vscode.window.showInformationMessage("Latest receipt posted. Check Commit Confessional output.");
     } catch (error) {
@@ -334,14 +341,14 @@ function registerCommands(context) {
     }
   }));
   context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.previewAiPercentage", async () => {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) {
-      void vscode.window.showErrorMessage("No workspace folder is open.");
+    const repoRoot = getPreferredRepoRoot();
+    if (!repoRoot) {
+      void vscode.window.showErrorMessage("No git repository was found in the current workspace.");
       return;
     }
 
     try {
-      await previewReceiptForRepo(folder.uri.fsPath);
+      await previewReceiptForRepo(repoRoot);
       outputChannel.show(true);
       void vscode.window.showInformationMessage("Preview AI percentage generated. Check Commit Confessional output.");
     } catch (error) {
@@ -412,31 +419,44 @@ async function handleDocumentChange(event) {
   const isPaste = detectPaste(insertedText, clipboardText);
   const source = classifyInsertionSource(now, isPaste, insertedText);
   if (source === "typed") return;
+  const contentText = isPaste ? clipboardText : insertedText;
+  const provider = inferInsertionProvider(source);
 
   lastPromptContext = {
     source,
     createdAt: now,
-    preview: buildPreview(isPaste ? clipboardText : insertedText),
+    preview: buildPreview(contentText),
     documentPath,
   };
 
+  if (provider) {
+    recordPendingAiInsertion(documentPath, contentText, {
+      provider,
+      model: lastDetectedModel,
+      tool: currentTool(),
+      source,
+      createdAt: now,
+    });
+  }
+
   await emitCommitEvent(source === "paste-event" ? "paste-detected" : "inline-suggestion", {
     appName: "vscode",
-    provider: source === "inline-suggestion" ? "copilot" : "editor",
+    provider: source === "inline-suggestion" ? provider || "copilot" : provider || "editor",
     extensionId: "vscode.editor",
     documentPath,
     method: source === "inline-suggestion" ? "SUGGESTION" : "PASTE",
     eventType: source,
     clipboardPreview: buildPreview(clipboardText),
     promptPreview,
-    contentHash: hashContent(isPaste ? clipboardText : insertedText),
+    contentHash: hashContent(contentText),
     lineCount: insertedText.split(/\r?\n/).length,
-    contentText: isPaste ? clipboardText : insertedText,
+    contentText,
     tool: currentTool(),
+    model: lastDetectedModel,
   });
   log(
     `${source}: ${path.basename(documentPath)} lines=${insertedText.split(/\r?\n/).length} tool=${currentTool()} preview=${buildPreview(
-      isPaste ? clipboardText : insertedText
+      contentText
     )}`
   );
 }
@@ -457,6 +477,16 @@ async function handleNarratorSave(doc, sidebar) {
   // Generate unified diff and count changes
   const diff = createUnifiedDiff(fsPath, previous, next);
   const changedLines = countChangedLines(diff);
+
+  try {
+    const tagSummary = updateAiDetectorStateForDocument(doc, previous, next);
+    if (tagSummary?.touchedByAi) {
+      log(`AI tags updated: ${tagSummary.filePath} ai=${tagSummary.aiTaggedLines}/${tagSummary.totalMeaningfulLines}`);
+    }
+  } catch (error) {
+    log(`AI detector update failed: ${error?.message || String(error)}`);
+  }
+
   if (changedLines < cfg.minChangedLines) return; // Skip minimal changes
 
   // Debounce if previous delta still pending (user still editing)
@@ -521,9 +551,7 @@ async function pollAiExtensionActivation(initial = false) {
 // === Repository Commit Polling ===
 // Monitor git repositories for new commits and analyze their AI contribution
 async function pollWorkspaceCommits(initial = false) {
-  const folders = vscode.workspace.workspaceFolders || [];
-  for (const folder of folders) {
-    const repoRoot = folder.uri.fsPath;
+  for (const repoRoot of getWorkspaceRepoRoots()) {
     let headSha = "";
     try {
       headSha = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim(); // Get current HEAD commit
@@ -609,9 +637,7 @@ async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
 // === Receipt Preview ===
 // Generate preview of AI contribution for staged/working changes
 async function previewReceiptForRepo(repoRoot) {
-  const stagedDiff = await runGit(["diff", "--cached", "--unified=0"], repoRoot).catch(() => "");
-  const workingDiff = await runGit(["diff", "--unified=0"], repoRoot).catch(() => "");
-  const diffText = [stagedDiff, workingDiff].filter(Boolean).join("\n");
+  const diffText = await buildPreviewDiffText(repoRoot);
 
   if (!diffText.trim()) {
     throw new Error("No staged or working-tree diff found.");
@@ -713,6 +739,7 @@ async function pollCopilotLogs(initial = false) {
     if (!model || seenCopilotLogLines.has(dedupeKey)) continue;
     seenCopilotLogLines.add(dedupeKey);
     lastCopilotLogActivityAt = Date.now();
+    lastDetectedModel = model;
     const tool = inferToolFromCopilotLogLine(normalizedLine);
     if (tool) {
       pendingTool = tool;
@@ -911,6 +938,385 @@ function appendJsonLine(payload) {
   try { fs.appendFileSync(LOG_PATH, `${JSON.stringify({ ts: new Date().toISOString(), ...payload })}\n`, "utf8"); } catch {}
 }
 
+function updateAiDetectorStateForDocument(doc, previousText, nextText) {
+  const repoRoot = getWorkspaceRootForUri(doc.uri);
+  if (!repoRoot) {
+    return null;
+  }
+
+  const detectorPath = path.join(repoRoot, AI_DETECTOR_FILE);
+  const detector = loadAiDetectorState(detectorPath);
+  const filePath = normalizeTrackedPath(path.relative(repoRoot, doc.uri.fsPath));
+  const fileState = detector.files[filePath] || createEmptyFileState(doc.languageId);
+  const nextLineTags = buildNextLineTags({
+    previousLineTags: fileState.lineTags,
+    nextText,
+    recentInsertions: getRecentAiInsertions(doc.uri.fsPath),
+  });
+  const aiTaggedLines = nextLineTags.filter((entry) => entry.ai).length;
+  const totalMeaningfulLines = nextLineTags.length;
+  const aiShare = totalMeaningfulLines > 0 ? Math.round((aiTaggedLines / totalMeaningfulLines) * 100) : 0;
+  const touchedByAi = aiTaggedLines > 0 || getRecentAiInsertions(doc.uri.fsPath).length > 0;
+
+  detector.files[filePath] = {
+    languageId: doc.languageId,
+    updatedAt: new Date().toISOString(),
+    totalMeaningfulLines,
+    aiTaggedLines,
+    aiShare,
+    dominantOrigin: aiShare >= 60 ? "ai-majority" : aiTaggedLines > 0 ? "mixed" : "human",
+    lineTags: nextLineTags.slice(0, 4000),
+  };
+  detector.updatedAt = new Date().toISOString();
+  fs.writeFileSync(detectorPath, `${JSON.stringify(detector, null, 2)}\n`, "utf8");
+
+  return {
+    filePath,
+    aiTaggedLines,
+    totalMeaningfulLines,
+    touchedByAi,
+  };
+}
+
+function buildNextLineTags({ previousLineTags, nextText, recentInsertions }) {
+  const now = new Date().toISOString();
+  const previousQueue = buildTagQueue(Array.isArray(previousLineTags) ? previousLineTags : []);
+  const insertionQueue = buildInsertionQueue(recentInsertions);
+  const nextLines = extractMeaningfulContentLines(nextText);
+
+  return nextLines.map((line) => {
+    const hash = hashContent(line);
+    const preview = buildPreview(line);
+    const carriedTag = shiftQueuedEntry(previousQueue, hash);
+    if (carriedTag) {
+      return {
+        ...carriedTag,
+        preview,
+        lastSeenAt: now,
+      };
+    }
+
+    const insertionTag = shiftQueuedEntry(insertionQueue, hash);
+    if (insertionTag) {
+      return {
+        hash,
+        preview,
+        ai: true,
+        provider: insertionTag.provider || null,
+        model: insertionTag.model || null,
+        tool: insertionTag.tool || null,
+        source: insertionTag.source || "inline-suggestion",
+        firstSeenAt: insertionTag.createdAt || now,
+        lastSeenAt: now,
+      };
+    }
+
+    return {
+      hash,
+      preview,
+      ai: false,
+      provider: null,
+      model: null,
+      tool: null,
+      source: "human",
+      firstSeenAt: now,
+      lastSeenAt: now,
+    };
+  });
+}
+
+function buildTagQueue(lineTags) {
+  const queue = new Map();
+  for (const tag of lineTags) {
+    const hash = String(tag?.hash || "");
+    if (!hash) continue;
+    if (!queue.has(hash)) {
+      queue.set(hash, []);
+    }
+    queue.get(hash).push(tag);
+  }
+  return queue;
+}
+
+function buildInsertionQueue(insertions) {
+  const queue = new Map();
+  for (const insertion of insertions) {
+    for (const line of insertion.lines || []) {
+      const hash = hashContent(line);
+      if (!hash) continue;
+      if (!queue.has(hash)) {
+        queue.set(hash, []);
+      }
+      queue.get(hash).push({
+        provider: insertion.provider,
+        model: insertion.model,
+        tool: insertion.tool,
+        source: insertion.source,
+        createdAt: insertion.createdAt,
+      });
+    }
+  }
+  return queue;
+}
+
+function shiftQueuedEntry(queue, hash) {
+  const items = queue.get(hash);
+  if (!items || items.length === 0) {
+    return null;
+  }
+  const entry = items.shift();
+  if (items.length === 0) {
+    queue.delete(hash);
+  }
+  return entry;
+}
+
+function recordPendingAiInsertion(documentPath, contentText, meta) {
+  const normalizedPath = String(documentPath || "");
+  if (!normalizedPath) {
+    return;
+  }
+
+  const lines = extractMeaningfulContentLines(contentText);
+  if (lines.length === 0) {
+    return;
+  }
+
+  const nextEntries = [...getRecentAiInsertions(normalizedPath), {
+    createdAt: meta.createdAt || Date.now(),
+    provider: meta.provider || null,
+    model: meta.model || null,
+    tool: meta.tool || null,
+    source: meta.source || "inline-suggestion",
+    lines,
+  }];
+  pendingAiInsertions.set(normalizedPath, nextEntries);
+}
+
+function getRecentAiInsertions(documentPath) {
+  const normalizedPath = String(documentPath || "");
+  const now = Date.now();
+  const entries = (pendingAiInsertions.get(normalizedPath) || []).filter((entry) => now - Number(entry.createdAt || 0) <= AI_TAG_WINDOW_MS);
+  if (entries.length > 0) {
+    pendingAiInsertions.set(normalizedPath, entries);
+  } else {
+    pendingAiInsertions.delete(normalizedPath);
+  }
+  return entries;
+}
+
+function loadAiDetectorState(detectorPath) {
+  try {
+    const raw = fs.readFileSync(detectorPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return normalizeAiDetectorState(parsed);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      log(`AI detector load failed: ${error.message}`);
+    }
+    return normalizeAiDetectorState(null);
+  }
+}
+
+function normalizeAiDetectorState(value) {
+  const parsed = value && typeof value === "object" ? value : {};
+  return {
+    version: AI_DETECTOR_VERSION,
+    updatedAt: parsed.updatedAt || null,
+    files: parsed.files && typeof parsed.files === "object" ? parsed.files : {},
+    commits: Array.isArray(parsed.commits) ? parsed.commits : [],
+  };
+}
+
+function createEmptyFileState(languageId) {
+  return {
+    languageId: languageId || "unknown",
+    updatedAt: null,
+    totalMeaningfulLines: 0,
+    aiTaggedLines: 0,
+    aiShare: 0,
+    dominantOrigin: "human",
+    lineTags: [],
+  };
+}
+
+function getWorkspaceRootForUri(uri) {
+  const documentPath = uri?.fsPath || "";
+  const repoRoot = findGitRootForPath(documentPath);
+  if (repoRoot) {
+    return repoRoot;
+  }
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  return folder?.uri?.fsPath || null;
+}
+
+function getPreferredRepoRoot() {
+  const activeDocumentPath = vscode.window.activeTextEditor?.document?.uri?.fsPath;
+  const activeRepoRoot = findGitRootForPath(activeDocumentPath);
+  if (activeRepoRoot) {
+    return activeRepoRoot;
+  }
+  return getWorkspaceRepoRoots()[0] || null;
+}
+
+function getWorkspaceRepoRoots() {
+  const roots = new Set();
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    for (const repoRoot of discoverGitRepos(folder.uri.fsPath, REPO_DISCOVERY_MAX_DEPTH)) {
+      roots.add(repoRoot);
+    }
+  }
+  return [...roots];
+}
+
+function discoverGitRepos(rootPath, remainingDepth) {
+  const normalizedRoot = String(rootPath || "");
+  if (!normalizedRoot || !fs.existsSync(normalizedRoot)) {
+    return [];
+  }
+
+  if (hasGitMetadata(normalizedRoot)) {
+    return [normalizedRoot];
+  }
+
+  if (remainingDepth <= 0) {
+    return [];
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(normalizedRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const discovered = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    if ([".git", "node_modules", "dist", "build", ".next"].includes(entry.name)) {
+      continue;
+    }
+    discovered.push(...discoverGitRepos(path.join(normalizedRoot, entry.name), remainingDepth - 1));
+  }
+  return discovered;
+}
+
+function findGitRootForPath(targetPath) {
+  const normalizedPath = String(targetPath || "");
+  if (!normalizedPath) {
+    return null;
+  }
+
+  let current = normalizedPath;
+  try {
+    const stats = fs.statSync(normalizedPath);
+    if (stats.isFile()) {
+      current = path.dirname(normalizedPath);
+    }
+  } catch {
+    current = path.dirname(normalizedPath);
+  }
+
+  while (current && current !== path.dirname(current)) {
+    if (hasGitMetadata(current)) {
+      return current;
+    }
+    current = path.dirname(current);
+  }
+
+  return hasGitMetadata(current) ? current : null;
+}
+
+function hasGitMetadata(targetPath) {
+  try {
+    return fs.existsSync(path.join(targetPath, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+async function buildPreviewDiffText(repoRoot) {
+  const stagedDiff = await runGit(["diff", "--cached", "--unified=0"], repoRoot).catch(() => "");
+  const workingDiff = await runGit(["diff", "--unified=0"], repoRoot).catch(() => "");
+  const untrackedDiffs = await readUntrackedFileDiffs(repoRoot);
+  return [stagedDiff, workingDiff, ...untrackedDiffs].filter(Boolean).join("\n");
+}
+
+async function readUntrackedFileDiffs(repoRoot) {
+  const output = await runGit(["ls-files", "--others", "--exclude-standard"], repoRoot).catch(() => "");
+  const filePaths = output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const diffs = [];
+
+  for (const relativePath of filePaths) {
+    const fullPath = path.join(repoRoot, relativePath);
+    let stats;
+    try {
+      stats = fs.statSync(fullPath);
+    } catch {
+      continue;
+    }
+
+    if (!stats.isFile() || stats.size > UNTRACKED_PREVIEW_MAX_BYTES) {
+      continue;
+    }
+
+    let content = "";
+    try {
+      content = fs.readFileSync(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    if (content.includes("\u0000")) {
+      continue;
+    }
+
+    diffs.push(createUntrackedFileDiff(relativePath, content));
+  }
+
+  return diffs;
+}
+
+function createUntrackedFileDiff(filePath, content) {
+  const normalizedPath = normalizeTrackedPath(filePath);
+  const lines = splitLines(content);
+  return [
+    `diff --git a/${normalizedPath} b/${normalizedPath}`,
+    "new file mode 100644",
+    "--- /dev/null",
+    `+++ b/${normalizedPath}`,
+    `@@ -0,0 +1,${lines.length} @@`,
+    ...lines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+function normalizeTrackedPath(value) {
+  return String(value || "").replace(/\\/g, "/");
+}
+
+function inferInsertionProvider(source) {
+  if (source === "inline-suggestion") {
+    return detectProviderFromText(`${currentTool()} ${lastDetectedModel || ""}`) || "copilot";
+  }
+
+  if (source === "paste-event" && currentTool() !== "Human / Unknown") {
+    return detectProviderFromText(`${currentTool()} ${lastDetectedModel || ""}`) || "copilot";
+  }
+
+  return null;
+}
+
+function detectProviderFromText(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("copilot")) return "copilot";
+  if (text.includes("codex") || text.includes("gpt") || text.includes("openai") || text.includes("chatgpt")) return "openai";
+  if (text.includes("claude") || text.includes("anthropic")) return "anthropic";
+  if (text.includes("gemini") || text.includes("google")) return "google";
+  return null;
+}
+
 // === Text Processing ===
 
 // Normalize whitespace by collapsing multiple spaces/tabs and trimming
@@ -938,6 +1344,27 @@ function extractAddedLineSamples(diffText, limit = 2) {
 function hashContent(value) {
   const normalized = normalizeWhitespace(value);
   return normalized ? `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}` : null;
+}
+
+function extractMeaningfulContentLines(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map(normalizeWhitespace)
+    .filter(isMeaningfulContentLine);
+}
+
+function isMeaningfulContentLine(line) {
+  const value = normalizeWhitespace(line);
+  if (value.length < 15) {
+    return false;
+  }
+  if (/^[{}()[\];,]+$/.test(value)) {
+    return false;
+  }
+  if (/^(import|export|from|return|const|let|var|module\.exports)\b\s*[^=;]*;?$/i.test(value) && value.length < 30) {
+    return false;
+  }
+  return true;
 }
 
 // === I/O and Logging ===
