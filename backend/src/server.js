@@ -14,6 +14,7 @@ import {
 } from "./services/repoContext.js";
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
 import { buildModelEvidenceReceipt } from "./services/modelEvidence.js";
+import { enrichReceiptWithIntegrations } from "./services/receiptIntegrations.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +22,7 @@ const projectRoot = path.resolve(__dirname, "../..");
 const dataDir = path.resolve(projectRoot, "backend/data");
 const eventLogPath = path.join(dataDir, "proxy-events.json");
 const receiptLogPath = path.join(dataDir, "latest-receipt.json");
+const receiptHistoryPath = path.join(dataDir, "receipt-history.json");
 const githubSessionPath = path.join(dataDir, "github-session.json");
 const mitmCaDir = path.join(dataDir, ".http-mitm-proxy");
 const PORT = Number(process.env.PORT || 4000);
@@ -63,6 +65,7 @@ const state = {
   recentCommits: await createRecentCommitSnapshots(projectRoot, 12),
   captures: await loadStoredCaptures(),
   latestReceipt: await loadStoredReceipt(),
+  receiptHistory: await loadReceiptHistory(),
   github: await loadGithubSession(),
   githubStates: new Map(),
 };
@@ -100,6 +103,7 @@ app.get("/api/health", async (_req, res) => {
     latestCommit: state.latestCommit,
     recentCommits: state.recentCommits,
     latestReceipt: state.latestReceipt,
+    latestCommitReceipt: findReceiptForCommit(state.latestCommit),
     github: buildGithubStatus(),
     captureCount: state.captures.length,
   });
@@ -131,6 +135,7 @@ app.get("/api/proxy/status", async (_req, res) => {
     latestCommit: state.latestCommit,
     recentCommits: state.recentCommits,
     latestReceipt: state.latestReceipt,
+    latestCommitReceipt: findReceiptForCommit(state.latestCommit),
     github: buildGithubStatus(),
     captures: state.captures,
     analytics: {
@@ -187,6 +192,7 @@ app.get("/api/dashboard", async (_req, res) => {
     latestCommit: state.latestCommit,
     recentCommits: state.recentCommits,
     latestReceipt: state.latestReceipt,
+    latestCommitReceipt: findReceiptForCommit(state.latestCommit),
     github: buildGithubStatus(),
     captures: state.captures,
     analytics: {
@@ -294,12 +300,15 @@ app.post("/api/extension/events", async (req, res) => {
 
 app.post("/api/receipt", async (req, res) => {
   const receipt = await buildModelEvidenceReceipt(req.body ?? {});
+  const enrichedReceipt = await enrichReceiptWithIntegrations(projectRoot, receipt);
   state.latestReceipt = {
-    ...receipt,
+    ...enrichedReceipt,
     updatedAt: new Date().toISOString(),
     commitHash: req.body?.commitHash || null,
   };
   await persistReceipt(state.latestReceipt);
+  upsertReceiptHistory(state.latestReceipt);
+  await persistReceiptHistory(state.receiptHistory);
   res.status(201).json({
     ok: true,
     ...state.latestReceipt,
@@ -478,6 +487,24 @@ async function persistReceipt(receipt) {
   await fs.writeFile(receiptLogPath, JSON.stringify(receipt, null, 2));
 }
 
+async function loadReceiptHistory() {
+  try {
+    const raw = await fs.readFile(receiptHistoryPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+    console.warn("Failed to load receipt history", error);
+    return [];
+  }
+}
+
+async function persistReceiptHistory(receipts) {
+  await fs.writeFile(receiptHistoryPath, JSON.stringify(receipts, null, 2));
+}
+
 async function loadGithubSession() {
   try {
     const raw = await fs.readFile(githubSessionPath, "utf8");
@@ -643,6 +670,10 @@ function matchReceiptToCommit(commit) {
   return commitHash === receiptHash || commitHash.startsWith(receiptHash) || receiptHash.startsWith(commitHash)
     ? state.latestReceipt
     : null;
+}
+
+function findReceiptForCommit(commit) {
+  return matchReceiptToCommit(commit);
 }
 
 function cleanupGithubStates() {

@@ -112,37 +112,102 @@ class SidebarProvider {
       <meta charset="utf-8"/>
       <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src http: https:;">
       <style>
-        body{margin:0;background:#0f1116;color:#e6e9ef;font:12px var(--vscode-font-family)}
-        .head{padding:10px;border-bottom:1px solid rgba(255,255,255,.08);background:linear-gradient(180deg,rgba(54,179,126,.18),transparent)}
-        .tabs,.meta,.actions{display:flex;gap:6px}.tabs{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.08)}
-        .tab,.btn{background:transparent;color:#9aa4b2;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:4px 8px;cursor:pointer}
-        .tab.active{color:#e6e9ef;border-color:rgba(54,179,126,.4);background:rgba(54,179,126,.12)}
-        #explorer,#editor,#docs{padding:10px}.panel{display:none}.panel.active{display:block}
-        pre{white-space:pre-wrap;word-break:break-word;background:#151a23;padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.08)}
-        .file,.card{padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:#151a23;margin-bottom:8px}
-        .muted{color:#9aa4b2}.tag{color:#7ee2b8;margin-right:6px}.btn.good{color:#8fd0a6}.btn.bad{color:#f38ba8}
+        :root{
+          --bg0:#181825;--bg1:#1e1e2e;--bg2:#232634;--bg3:#313244;--line:#45475a;
+          --text:#cdd6f4;--muted:#6c7086;--green:#a6e3a1;--blue:#89b4fa;--mauve:#cba6f7;--yellow:#fab387;--pink:#f38ba8;
+        }
+        *{box-sizing:border-box}
+        body{margin:0;background:var(--bg0);color:var(--text);font:12px var(--vscode-font-family)}
+        .shell{display:grid;grid-template-rows:auto auto 1fr auto;height:100vh;background:linear-gradient(180deg,rgba(137,180,250,.04),transparent 30%),var(--bg0)}
+        .titlebar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:rgba(24,24,37,.96)}
+        .dot{width:9px;height:9px;border-radius:50%}.d1{background:#ff5f57}.d2{background:#febc2e}.d3{background:#28c840}
+        .titlemeta{min-width:0}
+        .appname{font-size:11px;font-weight:600;color:var(--text)}
+        .apptag{font-size:10px;color:var(--muted)}
+        .status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:10px;color:var(--green)}
+        .live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 12px rgba(166,227,161,.65)}
+        .tabbar{display:flex;align-items:center;border-bottom:1px solid var(--line);background:var(--bg0)}
+        .tab{padding:7px 12px;font-size:10px;color:var(--muted);border-right:1px solid var(--line);cursor:pointer}
+        .tab.active{color:var(--text);background:var(--bg1);border-top:1px solid var(--blue)}
+        .panel{display:none;height:100%;overflow:auto}
+        .panel.active{display:block}
+        .frame{display:grid;grid-template-columns:150px 1fr;height:100%}
+        .explorer{border-right:1px solid var(--line);background:rgba(24,24,37,.8);padding:8px 0}
+        .explabel{padding:0 12px 6px;font-size:9px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}
+        .file{display:flex;align-items:center;gap:6px;padding:5px 12px;color:var(--muted);cursor:pointer;font-size:10px}
+        .file.active,.file:hover{background:var(--bg3);color:var(--text)}
+        .editor{padding:12px;background:var(--bg1)}
+        .editor-meta{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:10px;color:var(--muted)}
+        .editor-chip{padding:2px 7px;border-radius:999px;border:1px solid var(--line);background:rgba(137,180,250,.08);color:var(--blue)}
+        pre{margin:0;white-space:pre-wrap;word-break:break-word;border:1px solid var(--line);border-radius:8px;background:#171722;padding:12px;color:var(--text);line-height:1.55}
+        .docs-wrap{padding:10px;display:flex;flex-direction:column;gap:8px}
+        .voicebar{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg1);padding:8px 10px}
+        .vwave{display:flex;align-items:flex-end;gap:2px;height:16px}
+        .vbar{width:3px;border-radius:999px;background:var(--mauve);animation:wave var(--d,.45s) ease-in-out infinite alternate}
+        @keyframes wave{from{height:3px}to{height:14px}}
+        .vtxt{font-size:10px;color:var(--green);line-height:1.4}
+        .card{border:1px solid var(--line);border-radius:8px;background:var(--bg1);padding:10px}
+        .card.new{border-color:var(--blue);box-shadow:0 0 0 1px rgba(137,180,250,.2) inset}
+        .meta{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+        .avatar{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--bg3);color:var(--mauve);font-size:8px;font-weight:700}
+        .name{font-size:10px;color:var(--blue)}
+        .time{margin-left:auto;font-size:9px;color:var(--muted)}
+        .fileline{font-size:9px;color:var(--yellow);margin-bottom:5px}
+        .summary{font-size:11px;line-height:1.55;color:var(--text)}
+        .tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+        .tag{padding:2px 6px;border-radius:999px;font-size:9px}
+        .tag.pur{background:#2a1f3d;color:var(--mauve)}
+        .tag.grn{background:#1a2f1a;color:var(--green)}
+        .actions{display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+        .btn{border:1px solid var(--line);border-radius:5px;background:transparent;color:var(--muted);padding:3px 8px;font-size:9px;cursor:pointer}
+        .btn.good{border-color:rgba(166,227,161,.35);color:var(--green)}
+        .btn.bad{border-color:rgba(243,139,168,.35);color:var(--pink)}
+        .empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:11px;background:rgba(30,30,46,.55)}
+        .statusbar{display:flex;align-items:center;gap:10px;padding:6px 10px;border-top:1px solid var(--line);background:var(--bg3);font-size:9px;color:var(--muted)}
+        .statusbar .ok{color:var(--green)}
+        .statusbar .strong{color:var(--text)}
       </style></head><body>
-      <div class="head"><strong>Hackbyte Narrator</strong><div class="muted">Merged detector + live docs</div></div>
-      <div class="tabs">
-        <button class="tab" data-tab="explorer">Explorer</button>
-        <button class="tab" data-tab="editor">Editor</button>
-        <button class="tab active" data-tab="docs">Live Docs</button>
+      <div class="shell">
+        <div class="titlebar">
+          <div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div>
+          <div class="titlemeta">
+            <div class="appname">Hackbyte Narrator</div>
+            <div class="apptag">merged detector + live docs</div>
+          </div>
+          <div class="status"><div class="live-dot"></div><span>live</span></div>
+        </div>
+        <div class="tabbar">
+          <div class="tab" data-tab="explorer">Explorer</div>
+          <div class="tab" data-tab="editor">Editor</div>
+          <div class="tab active" data-tab="docs">Live Docs</div>
+        </div>
+        <div id="explorer" class="panel"></div>
+        <div id="editor" class="panel"></div>
+        <div id="docs" class="panel active"></div>
+        <div class="statusbar">
+          <span class="ok">SpacetimeDB ready</span>
+          <span class="strong">VS Code extension active</span>
+          <span id="doc-count">0 docs</span>
+          <span style="margin-left:auto" id="active-file">waiting for save</span>
+        </div>
       </div>
-      <div id="explorer" class="panel"></div>
-      <div id="editor" class="panel"></div>
-      <div id="docs" class="panel active"></div>
       <script nonce="${nonce}">
         const vscode = acquireVsCodeApi(); let docs = []; let active = "docs"; const votes = new Map();
         const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
         const tail = (s) => { s = String(s || ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf(String.fromCharCode(92))); return i >= 0 ? s.slice(i + 1) : s; };
+        const initials = (s) => String(s || "?").split(/\\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase() || "").join("");
+        const relTime = (value) => { if(!value) return "just now"; const date = new Date(value); if(Number.isNaN(date.getTime())) return String(value); const diff = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000)); if(diff < 1) return "just now"; if(diff < 60) return diff + " min ago"; if(diff < 1440) return Math.round(diff / 60) + " hr ago"; return Math.round(diff / 1440) + " d ago"; };
+        const tagTone = (index) => index % 2 === 0 ? "pur" : "grn";
         function setTab(name){ active = name; document.querySelectorAll(".tab").forEach((b)=>b.classList.toggle("active", b.dataset.tab===name)); document.querySelectorAll(".panel").forEach((p)=>p.classList.toggle("active", p.id===name)); }
         function render(){
           const files = [...new Set(docs.map((d)=>d.filePath).filter(Boolean))];
-          document.getElementById("explorer").innerHTML = files.map((fp)=>'<div class="file" data-fp="'+esc(fp)+'">'+esc(tail(fp))+"</div>").join("") || '<div class="muted">No docs yet</div>';
-          document.querySelectorAll(".file").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"openFile", filePath:el.dataset.fp}));
           const latest = docs[0];
-          document.getElementById("editor").innerHTML = latest ? '<div class="meta muted">'+esc(latest.language || "text")+"</div><pre>"+esc(latest.diff || "")+"</pre>" : '<div class="muted">Save a file to generate a diff.</div>';
-          document.getElementById("docs").innerHTML = docs.map((d)=>'<div class="card"><strong>'+esc(tail(d.filePath||"unknown"))+'</strong><div class="muted">'+esc(d.language||"text")+'</div><div style="margin-top:6px">'+esc(d.summary||"")+'</div><div style="margin-top:6px">'+((d.tags||[]).map((t)=>'<span class="tag">#'+esc(t)+'</span>').join(""))+'</div><div class="actions" style="margin-top:8px"><button class="btn good" data-id="'+esc(d.id)+'" data-dir="up">thumbs up</button><button class="btn bad" data-id="'+esc(d.id)+'" data-dir="down">flag</button></div></div>').join("") || '<div class="muted">Waiting for live docs.</div>';
+          document.getElementById("doc-count").textContent = docs.length + " docs";
+          document.getElementById("active-file").textContent = latest?.filePath ? tail(latest.filePath) : "waiting for save";
+          document.getElementById("explorer").innerHTML = '<div class="frame"><div class="explorer"><div class="explabel">Explorer</div>' + (files.map((fp, index)=>'<div class="file'+(index===0?' active':'')+'" data-fp="'+esc(fp)+'">'+esc(tail(fp))+'</div>').join("") || '<div class="empty" style="margin:0 10px">No docs yet</div>') + '</div><div class="editor"><div class="editor-meta"><span>Tracked files</span><span class="editor-chip">'+files.length+' items</span></div><pre>' + esc(files.join("\\n") || "Save a file to populate explorer state.") + '</pre></div></div>';
+          document.querySelectorAll(".file").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"openFile", filePath:el.dataset.fp}));
+          document.getElementById("editor").innerHTML = latest ? '<div class="frame"><div class="explorer"><div class="explabel">Context</div><div class="file active">'+esc(tail(latest.filePath || "unknown"))+'</div><div class="file">'+esc(latest.language || "text")+'</div><div class="file">'+esc(relTime(latest.createdAt))+'</div></div><div class="editor"><div class="editor-meta"><span>'+esc(latest.language || "text")+'</span><span class="editor-chip">'+esc(tail(latest.filePath || "unknown"))+'</span></div><pre>'+esc(latest.diff || "")+'</pre></div></div>' : '<div class="docs-wrap"><div class="empty">Save a file to generate a diff.</div></div>';
+          document.getElementById("docs").innerHTML = '<div class="docs-wrap"><div class="voicebar"><div class="vwave"><div class="vbar" style="--d:.35s"></div><div class="vbar" style="--d:.5s"></div><div class="vbar" style="--d:.25s"></div><div class="vbar" style="--d:.45s"></div><div class="vbar" style="--d:.3s"></div></div><div class="vtxt">' + esc(latest?.summary || "Waiting for the next narrated code update...") + '</div></div>' + (docs.map((d, index)=>'<div class="card'+(index===0?' new':'')+'"><div class="meta"><div class="avatar">'+esc(initials(d.author || "dev"))+'</div><div class="name">'+esc(d.author || "Developer")+'</div><div class="time">'+esc(relTime(d.createdAt))+'</div></div><div class="fileline">'+esc(tail(d.filePath || "unknown"))+' | '+esc(d.language || "text")+'</div><div class="summary">'+esc(d.summary || "")+'</div><div class="tags">'+((d.tags||[]).map((t, tagIndex)=>'<span class="tag '+tagTone(tagIndex)+'">#'+esc(t)+'</span>').join(""))+'</div><div class="actions"><span style="font-size:9px;color:var(--muted)">Accurate?</span><button class="btn good" data-id="'+esc(d.id)+'" data-dir="up">thumbs up</button><button class="btn bad" data-id="'+esc(d.id)+'" data-dir="down">flag</button></div></div>').join("") || '<div class="empty">Waiting for live docs.</div>') + '</div>';
           document.querySelectorAll(".btn[data-id]").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"vote", id:el.dataset.id, direction:el.dataset.dir}));
         }
         window.addEventListener("message",(e)=>{ if(e.data?.type==="docs"){ docs = Array.isArray(e.data.docs) ? e.data.docs : []; render(); } });

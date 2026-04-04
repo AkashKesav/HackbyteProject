@@ -3,10 +3,20 @@
 :root {
   color-scheme: dark;
   font-family: "Segoe UI", sans-serif;
+  background: #0b0d12;
+}
+
+html {
+  background: #0b0d12;
 }
 
 body {
   margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(circle at top left, rgba(77, 142, 255, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(31, 200, 107, 0.08), transparent 24%),
+    #0b0d12;
 }
 
 button,
@@ -14,4 +24,12 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+code {
+  font-family: "Consolas", "SFMono-Regular", monospace;
 }
