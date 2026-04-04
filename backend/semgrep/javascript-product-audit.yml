@@ -1,0 +1,186 @@
+rules:
+  - id: commit-confessional.javascript.sql-template-query
+    message: Possible SQL injection via string-built SQL query.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - nodejs
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      vulnerability_class:
+        - SQL Injection
+    pattern-regex: (?is)`\s*(SELECT|UPDATE|INSERT|DELETE)\b[\s\S]{0,250}\$\{[^}]+\}[\s\S]{0,250}`
+
+  - id: commit-confessional.javascript.innerhtml-xss
+    message: User-controlled HTML assigned to innerHTML can lead to XSS.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - browser
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+        - "A07:2017 - Cross-Site Scripting (XSS)"
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    pattern: $TARGET.innerHTML = `...${$INPUT}...`
+
+  - id: commit-confessional.javascript.raw-html-template-xss
+    message: Unescaped interpolation inside an HTML template can lead to XSS.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - browser
+        - express
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+        - "A07:2017 - Cross-Site Scripting (XSS)"
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    pattern-regex: (?is)(?:return|(?:const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*\s*=)\s*`[^`]{0,2500}<[^`>]+>[^`]{0,2500}\$\{[^}]+\}[^`]{0,2500}`
+
+  - id: commit-confessional.javascript.express-html-response-xss
+    message: Raw HTML template containing interpolation is sent in an Express response.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - express
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+        - "A07:2017 - Cross-Site Scripting (XSS)"
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: res.send(`...${$INPUT}...`)
+          - pattern: res.status(...).send(`...${$INPUT}...`)
+          - pattern: |
+              const $HTML = `...${$INPUT}...`;
+              ...
+              res.send($HTML)
+          - pattern: |
+              const $HTML = `...${$INPUT}...`;
+              ...
+              res.status(...).send($HTML)
+          - pattern: |
+              let $HTML = `...${$INPUT}...`;
+              ...
+              res.send($HTML)
+          - pattern: |
+              let $HTML = `...${$INPUT}...`;
+              ...
+              res.status(...).send($HTML)
+          - pattern: |
+              var $HTML = `...${$INPUT}...`;
+              ...
+              res.send($HTML)
+          - pattern: |
+              var $HTML = `...${$INPUT}...`;
+              ...
+              res.status(...).send($HTML)
+
+  - id: commit-confessional.javascript.open-redirect-from-query
+    message: Request query data reaches a redirect sink without validation.
+    severity: WARNING
+    mode: taint
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - express
+      cwe:
+        - "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      vulnerability_class:
+        - Open Redirect
+    pattern-sources:
+      - pattern: req.query.$PARAM
+    pattern-sinks:
+      - pattern-either:
+          - pattern: res.redirect($URL)
+          - pattern: res.set("Location", $URL)
+          - pattern: res.header("Location", $URL)
+
+  - id: commit-confessional.javascript.path-traversal-readfilesync
+    message: User input is interpolated into a filesystem path.
+    severity: WARNING
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - nodejs
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      vulnerability_class:
+        - Path Traversal
+    pattern-either:
+      - pattern: $FS.readFileSync(`...${$NAME}...`, ...)
+      - pattern: $FS.readFile(`...${$NAME}...`, ...)
+
+  - id: commit-confessional.javascript.exec-template-command
+    message: Interpolated shell commands passed to exec can enable command injection.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    metadata:
+      category: security
+      technology:
+        - javascript
+        - nodejs
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      vulnerability_class:
+        - Command Injection
+    pattern-either:
+      - pattern: exec(`...${$INPUT}...`, ...)
+      - pattern: |
+          const $CMD = `...${$INPUT}...`;
+          ...
+          exec($CMD, ...)
+      - pattern: |
+          let $CMD = `...${$INPUT}...`;
+          ...
+          exec($CMD, ...)
+      - pattern: |
+          var $CMD = `...${$INPUT}...`;
+          ...
+          exec($CMD, ...)

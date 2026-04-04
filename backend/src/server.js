@@ -308,8 +308,11 @@ app.post("/api/receipt", async (req, res) => {
   const receipt = await buildModelEvidenceReceipt({
     ...(req.body ?? {}),
     aiDetectorPath: getAiDetectorPath(projectRoot),
+    captureLog: state.captures,
   });
-  const enrichedReceipt = await enrichReceiptWithIntegrations(projectRoot, receipt);
+  const enrichedReceipt = await enrichReceiptWithIntegrations(projectRoot, receipt, {
+    filePaths: normalizeReceiptFilePaths(req.body?.filePaths, req.body?.targetPath),
+  });
   state.latestReceipt = {
     ...enrichedReceipt,
     updatedAt: new Date().toISOString(),
@@ -319,6 +322,8 @@ app.post("/api/receipt", async (req, res) => {
   await persistReceipt(state.latestReceipt);
   await persistReceiptHistory(state.receiptHistory);
   await recordCommitInAiDetector(projectRoot, state.latestReceipt, req.body?.diffText || "");
+  state.latestCommit = await createLatestCommitSnapshot(projectRoot);
+  state.recentCommits = await buildRecentCommitFeed();
   res.status(201).json({
     ok: true,
     ...state.latestReceipt,
@@ -587,7 +592,7 @@ async function refreshRepoContextIfNeeded(force = false) {
 async function buildRecentCommitFeed() {
   const localCommits = await createRecentCommitSnapshots(projectRoot, 12);
   const githubCommits = await fetchGithubRepoCommits(12);
-  const sourceCommits = githubCommits.length > 0 ? githubCommits : localCommits;
+  const sourceCommits = mergeCommitSources(localCommits, githubCommits, 12);
 
   return sourceCommits.map((commit) => {
     const receipt = matchReceiptToCommit(commit);
@@ -611,8 +616,62 @@ async function buildRecentCommitFeed() {
             estimatedAiPercentage: copilot.estimatedAiPercentage,
           }
         : null,
-    };
+      };
   });
+}
+
+function mergeCommitSources(localCommits = [], githubCommits = [], limit = 12) {
+  const commitsByHash = new Map();
+
+  for (const commit of githubCommits) {
+    upsertMergedCommit(commitsByHash, commit);
+  }
+
+  for (const commit of localCommits) {
+    upsertMergedCommit(commitsByHash, commit);
+  }
+
+  return [...commitsByHash.values()]
+    .sort(compareCommitSnapshots)
+    .slice(0, Math.max(1, limit));
+}
+
+function upsertMergedCommit(target, commit) {
+  const hash = normalizeCommitHash(commit?.hash);
+  if (!hash) {
+    return;
+  }
+
+  const previous = target.get(hash) || {};
+  target.set(hash, {
+    ...previous,
+    ...commit,
+    hash: commit?.hash || previous.hash || null,
+    shortHash: commit?.shortHash || previous.shortHash || hash.slice(0, 7),
+    authorName: commit?.authorName || previous.authorName || null,
+    authorEmail: commit?.authorEmail || previous.authorEmail || null,
+    subject: commit?.subject || previous.subject || "Untitled commit",
+    authoredAt: commit?.authoredAt || previous.authoredAt || null,
+    classification: commit?.classification || previous.classification || "unknown",
+    note: commit?.note || previous.note || null,
+    htmlUrl: commit?.htmlUrl || previous.htmlUrl || null,
+  });
+}
+
+function compareCommitSnapshots(left, right) {
+  const timeDelta = parseCommitTime(right) - parseCommitTime(left);
+  if (timeDelta !== 0) {
+    return timeDelta;
+  }
+
+  const leftHash = normalizeCommitHash(left?.hash);
+  const rightHash = normalizeCommitHash(right?.hash);
+  return rightHash.localeCompare(leftHash);
+}
+
+function parseCommitTime(commit) {
+  const timestamp = Date.parse(commit?.authoredAt || 0);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function mapProviderToHost(provider) {
@@ -751,6 +810,37 @@ function normalizeFrontendReturnPath(value) {
   return pathValue;
 }
 
+function normalizeReceiptFilePaths(filePaths, targetPath) {
+  const requestedPaths = Array.isArray(filePaths) && filePaths.length > 0
+    ? filePaths
+    : targetPath
+      ? [targetPath]
+      : [];
+
+  return [...new Set(
+    requestedPaths
+      .map((value) => normalizeReceiptFilePath(value))
+      .filter(Boolean)
+  )];
+}
+
+function normalizeReceiptFilePath(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) {
+    return null;
+  }
+
+  const resolvedPath = path.isAbsolute(rawValue)
+    ? path.resolve(rawValue)
+    : path.resolve(projectRoot, rawValue);
+  const relativePath = path.relative(projectRoot, resolvedPath);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return null;
+  }
+
+  return relativePath.replace(/\\/g, "/");
+}
+
 function buildFrontendRedirectUrl(returnPath, githubStatus, reason) {
   const url = new URL(FRONTEND_URL);
   url.pathname = normalizeFrontendReturnPath(returnPath);
@@ -803,6 +893,7 @@ function normalizeProxyAuthor(req) {
 function normalizeExtensionEvent(event) {
   const rawUrl = String(event.url || event.endpoint || "");
   let parsedUrl = null;
+  const model = event.model || event.modelName || event.metadata?.model || null;
 
   try {
     parsedUrl = new URL(rawUrl);
@@ -829,6 +920,7 @@ function normalizeExtensionEvent(event) {
 
   return {
     provider: event.provider || null,
+    model,
     host,
     path: pathValue,
     url: rawUrl || `${host}${pathValue}`,
@@ -841,6 +933,7 @@ function normalizeExtensionEvent(event) {
     },
     body: {
       prompt: promptLines.join("\n"),
+      model,
       metadata: event,
     },
     author: {

@@ -1,0 +1,48 @@
+name: Dependency Audit
+
+on:
+  push:
+    branches:
+      - main
+      - test
+  pull_request:
+  schedule:
+    - cron: "32 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm-audit:
+    name: npm audit (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: root
+            directory: .
+          - name: narrator
+            directory: living-codebase-narrator/living-codebase-narrator/living-codebase-narrator
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ${{ matrix.directory }}
+
+      - name: Run npm audit
+        run: npm audit --audit-level=low
+        working-directory: ${{ matrix.directory }}

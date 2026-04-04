@@ -10,8 +10,10 @@ const MAX_LOG_LINES = 500;
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const HASH_TIME_WINDOW_MS = 60 * 1000;
 const PREVIEW_EVENT_WINDOW_MS = 3 * 60 * 1000;
-const MIN_MEANINGFUL_LINE_LENGTH = 15;
+const MIN_MEANINGFUL_LINE_LENGTH = 8;
 const MIN_DIFF_LINES_FOR_PERCENTAGE = 3;
+const BLOCK_SIGNATURE_MATCH_RATIO = 0.7;
+const BLOCK_LINE_SIMILARITY_THRESHOLD = 0.6;
 
 export async function buildModelEvidenceReceipt(payload = {}) {
   const [vsCodeLog, firefoxLog, aiDetectorState] = await Promise.all([
@@ -19,11 +21,12 @@ export async function buildModelEvidenceReceipt(payload = {}) {
     loadJsonLines(payload.firefoxLog, firefoxLogPath),
     loadAiDetectorState(payload.aiDetectorPath),
   ]);
+  const captureLog = normalizeCaptureLog(payload.captureLog);
 
-  const mode = payload.receiptUrl === "preview://working-tree" ? "preview" : "commit";
+  const mode = isPreviewReceipt(payload.receiptUrl) ? "preview" : "commit";
   const diffText = buildDiffText(payload);
   const diffAnalysis = analyzeDiff(diffText);
-  const evidence = correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorState);
+  const evidence = correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, aiDetectorState);
   const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis, mode, aiDetectorState);
 
   return {
@@ -38,6 +41,7 @@ export async function buildModelEvidenceReceipt(payload = {}) {
       diffHashes: diffAnalysis.hashes.size,
       totalChangedLines: diffAnalysis.totalChangedLines,
       meaningfulChangedLines: diffAnalysis.meaningfulChangedLines.length,
+      captureEntries: captureLog.length,
       taggedFiles: Object.keys(aiDetectorState.files || {}).length,
       taggedCommits: Array.isArray(aiDetectorState.commits) ? aiDetectorState.commits.length : 0,
     },
@@ -129,6 +133,8 @@ function analyzeDiff(diffText) {
         filePath: currentFilePath,
         text: normalized,
         hash,
+        signature: createStructuralSignature(normalized),
+        fingerprint: createTokenFingerprint(normalized),
       });
       hashes.add(hash);
     }
@@ -143,15 +149,20 @@ function analyzeDiff(diffText) {
   };
 }
 
-function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorState) {
+function correlateLogs(vsCodeLog, firefoxLog, captureLog, diffAnalysis, mode, aiDetectorState) {
   const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
   const recentFirefoxLog = filterRecentEntries(firefoxLog, mode);
+  const recentCaptureLog = filterRecentCaptures(captureLog, mode);
   const firefoxCopies = recentFirefoxLog.filter((entry) => entry.eventType === "copy" || entry.type === "copy");
   const vscodePastes = recentVsCodeLog.filter(
     (entry) => entry.eventType === "paste-event" || entry.source === "paste-event" || entry.label === "paste-detected"
   );
   const vscodeSuggestions = recentVsCodeLog.filter(
-    (entry) => entry.eventType === "inline-suggestion" || entry.source === "inline-suggestion"
+    (entry) =>
+      entry.eventType === "inline-suggestion" ||
+      entry.source === "inline-suggestion" ||
+      entry.label === "copilot-log-completion" ||
+      entry.source === "copilot-log-completion"
   );
   const modelQueries = recentVsCodeLog.filter(
     (entry) => entry.label === "model-query" || entry.source === "copilot-log"
@@ -175,6 +186,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
   const combinedCopilotCoverage = combineCoverage(diffAnalysis.meaningfulLineRecords, copilotCoverage, taggedCopilotCoverage);
   const tagEvidence = buildTagEvidenceLines(taggedCoverage);
   const copilotTagEvidence = buildTagEvidenceLines(taggedCopilotCoverage);
+  const resolvedModel = resolveEvidenceModel(modelQueries, recentCaptureLog);
 
   for (const copy of firefoxCopies) {
     const matchingPaste = vscodePastes.find((paste) => {
@@ -191,7 +203,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
         certainty: "HIGH",
         method: "hash-correlation",
         provider: copy.provider || "unknown",
-        model: latestModel(modelQueries),
+        model: resolvedModel,
         contribution: buildContributionSummary(combinedCoverage, "HIGH", mode),
         copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
         evidence: [
@@ -210,7 +222,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
         certainty: "HIGH",
         method: "diff-hash-match",
         provider: copy.provider || "unknown",
-        model: latestModel(modelQueries),
+        model: resolvedModel,
         contribution: buildContributionSummary(combinedCoverage, "HIGH", mode),
         copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
         evidence: [
@@ -233,7 +245,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
         certainty: "PROBABLE",
         method: "time-correlation",
         provider: copy.provider || "unknown",
-        model: latestModel(modelQueries),
+        model: resolvedModel,
         contribution: buildContributionSummary(combinedCoverage, "MEDIUM", mode),
         copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
         evidence: [
@@ -254,18 +266,37 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
           ? "PROBABLE"
           : taggedCopilotCoverage.exactMatchedLines > 0
             ? "HIGH"
+            : taggedCopilotCoverage.structuralMatchedLines > 0 || taggedCopilotCoverage.similarityMatchedLines > 0
+              ? "PROBABLE"
             : "PROBABLE",
       method:
         copilotCoverage.aiMatchedLines > 0
           ? "copilot-diff-coverage"
           : taggedCopilotCoverage.lineageMatchedLines > 0
             ? "copilot-tag-lineage"
-            : "copilot-tag-match",
+            : taggedCopilotCoverage.similarityMatchedLines > 0
+              ? "copilot-tag-similarity"
+              : taggedCopilotCoverage.structuralMatchedLines > 0
+                ? "copilot-tag-signature"
+                : "copilot-tag-match",
       provider: "copilot",
-      model: latestModel(modelQueries),
-      contribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
-      copilotContribution: buildContributionSummary(combinedCopilotCoverage, "MEDIUM", mode),
+      model: resolvedModel,
+      contribution: buildContributionSummary(
+        combinedCopilotCoverage,
+        copilotCoverage.aiMatchedLines > 0 || taggedCopilotCoverage.exactMatchedLines > 0 || taggedCopilotCoverage.structuralMatchedLines > 0
+          ? "MEDIUM"
+          : "LOW",
+        mode
+      ),
+      copilotContribution: buildContributionSummary(
+        combinedCopilotCoverage,
+        copilotCoverage.aiMatchedLines > 0 || taggedCopilotCoverage.exactMatchedLines > 0 || taggedCopilotCoverage.structuralMatchedLines > 0
+          ? "MEDIUM"
+          : "LOW",
+        mode
+      ),
       evidence: [
+        ...buildModelEvidenceLines(recentCaptureLog, resolvedModel),
         ...(copilotCoverage.aiMatchedLines > 0
           ? [
               `Copilot-attributed VS Code insertions matched ${copilotCoverage.aiMatchedLines} changed lines`,
@@ -279,13 +310,33 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
 
   if (taggedCoverage.aiMatchedLines > 0) {
     return {
-      certainty: taggedCoverage.exactMatchedLines > 0 ? "HIGH" : "PROBABLE",
-      method: taggedCoverage.lineageMatchedLines > 0 ? "stored-ai-lineage" : "stored-ai-tags",
+      certainty:
+        taggedCoverage.exactMatchedLines > 0
+          ? "HIGH"
+          : taggedCoverage.structuralMatchedLines > 0 || taggedCoverage.similarityMatchedLines > 0
+            ? "PROBABLE"
+            : "PROBABLE",
+      method:
+        taggedCoverage.lineageMatchedLines > 0
+          ? "stored-ai-lineage"
+          : taggedCoverage.similarityMatchedLines > 0
+            ? "stored-ai-similarity"
+            : taggedCoverage.structuralMatchedLines > 0
+              ? "stored-ai-signature"
+              : "stored-ai-tags",
       provider: null,
-      model: latestModel(modelQueries),
-      contribution: buildContributionSummary(combinedCoverage, taggedCoverage.exactMatchedLines > 0 ? "MEDIUM" : "LOW", mode),
-      copilotContribution: buildContributionSummary(combinedCopilotCoverage, taggedCopilotCoverage.aiMatchedLines > 0 ? "MEDIUM" : "LOW", mode),
-      evidence: tagEvidence,
+      model: resolvedModel,
+      contribution: buildContributionSummary(
+        combinedCoverage,
+        taggedCoverage.exactMatchedLines > 0 || taggedCoverage.structuralMatchedLines > 0 ? "MEDIUM" : "LOW",
+        mode
+      ),
+      copilotContribution: buildContributionSummary(
+        combinedCopilotCoverage,
+        taggedCopilotCoverage.exactMatchedLines > 0 || taggedCopilotCoverage.structuralMatchedLines > 0 ? "MEDIUM" : "LOW",
+        mode
+      ),
+      evidence: [...buildModelEvidenceLines(recentCaptureLog, resolvedModel), ...tagEvidence],
     };
   }
 
@@ -293,15 +344,69 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, aiDetectorStat
     certainty: "NONE",
     method: "none",
     provider: null,
-    model: null,
+    model: resolvedModel,
     contribution: buildContributionSummary(combinedCoverage, "LOW", mode),
     copilotContribution: buildContributionSummary(combinedCopilotCoverage, "LOW", mode),
-    evidence: [],
+    evidence: buildModelEvidenceLines(recentCaptureLog, resolvedModel),
   };
 }
 
+function normalizeCaptureLog(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry) => entry && typeof entry === "object");
+}
+
+function resolveEvidenceModel(modelQueries, captureLog) {
+  return latestCaptureModel(captureLog) || latestModel(modelQueries);
+}
+
 function latestModel(entries) {
-  return entries.at(-1)?.model || null;
+  const withModels = entries.filter((entry) => typeof entry?.model === "string" && entry.model.trim());
+  return withModels.at(-1)?.model || null;
+}
+
+function latestCaptureModel(captureLog) {
+  const withModels = captureLog
+    .map((entry) => ({
+      model: extractCaptureModel(entry),
+      capturedAt: Date.parse(entry?.capturedAt || entry?.ts || 0),
+      relatedToRepo: entry?.relatedToRepo !== false,
+    }))
+    .filter((entry) => entry.relatedToRepo && entry.model);
+
+  withModels.sort((left, right) => (Number.isNaN(left.capturedAt) ? 0 : left.capturedAt) - (Number.isNaN(right.capturedAt) ? 0 : right.capturedAt));
+  return withModels.at(-1)?.model || null;
+}
+
+function extractCaptureModel(entry) {
+  return (
+    entry?.model ||
+    entry?.requestBody?.model ||
+    entry?.requestBody?.metadata?.model ||
+    entry?.requestBody?.metadata?.modelName ||
+    null
+  );
+}
+
+function buildModelEvidenceLines(captureLog, resolvedModel) {
+  if (!resolvedModel) {
+    return [];
+  }
+
+  const capture = [...captureLog]
+    .filter((entry) => extractCaptureModel(entry) === resolvedModel)
+    .sort((left, right) => Date.parse(right?.capturedAt || 0) - Date.parse(left?.capturedAt || 0))[0];
+
+  if (!capture) {
+    return [];
+  }
+
+  return [
+    `Latest ingested model ${resolvedModel} from ${capture.provider || "unknown"} capture at ${capture.capturedAt || "unknown time"}`,
+  ];
 }
 
 function hashContent(value) {
@@ -434,6 +539,14 @@ function buildTagEvidenceLines(taggedCoverage) {
     lines.push(`Stored AI tags matched ${taggedCoverage.exactMatchedLines} changed lines from earlier saves`);
   }
 
+  if (taggedCoverage.structuralMatchedLines > 0) {
+    lines.push(`Stored AI signatures matched ${taggedCoverage.structuralMatchedLines} edited lines`);
+  }
+
+  if (taggedCoverage.similarityMatchedLines > 0) {
+    lines.push(`Stored AI similarity matching attributed ${taggedCoverage.similarityMatchedLines} edited lines`);
+  }
+
   if (taggedCoverage.lineageMatchedLines > 0) {
     lines.push(`AI-majority file lineage attributed ${taggedCoverage.lineageMatchedLines} additional changed lines`);
   }
@@ -453,8 +566,30 @@ function normalizeDiffPath(value) {
   return trimmed.replace(/^a\//, "").replace(/^b\//, "").replace(/\\/g, "/");
 }
 
+function isPreviewReceipt(receiptUrl) {
+  return String(receiptUrl || "").startsWith("preview://");
+}
+
 function normalizeWhitespace(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function createStructuralSignature(value) {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/\b0x[a-f0-9]+\b/gi, "<num>")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "<num>")
+    .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "<str>");
+}
+
+function createTokenFingerprint(value) {
+  return [...new Set(
+    createStructuralSignature(value).match(/[a-z_][a-z0-9_$]*/gi) || []
+  )]
+    .map((token) => token.toLowerCase())
+    .sort()
+    .slice(0, 24)
+    .join("|");
 }
 
 function isMeaningfulLine(line) {
@@ -464,10 +599,6 @@ function isMeaningfulLine(line) {
   }
 
   if (/^[{}()[\];,]+$/.test(value)) {
-    return false;
-  }
-
-  if (/^(import|export|from|return|const|let|var|module\.exports)\b\s*[^=;]*;?$/i.test(value) && value.length < 30) {
     return false;
   }
 
@@ -486,6 +617,18 @@ function filterRecentEntries(entries, mode) {
   });
 }
 
+function filterRecentCaptures(entries, mode) {
+  if (mode !== "preview") {
+    return entries;
+  }
+
+  const cutoff = Date.now() - PREVIEW_EVENT_WINDOW_MS;
+  return entries.filter((entry) => {
+    const ts = Date.parse(entry?.capturedAt || entry?.ts || 0);
+    return !Number.isNaN(ts) && ts >= cutoff;
+  });
+}
+
 function isExplicitTool(tool) {
   const value = String(tool || "");
   return value !== "" && value !== "Human / Unknown";
@@ -493,18 +636,12 @@ function isExplicitTool(tool) {
 
 function findBlockMatches(changedLines, snippetBlocks) {
   const matches = [];
+  const changedRecords = changedLines.map(buildBlockLineRecord);
 
   for (const block of snippetBlocks) {
+    const blockRecords = block.map(buildBlockLineRecord);
     for (let start = 0; start <= changedLines.length - block.length; start += 1) {
-      let matchesBlock = true;
-      for (let offset = 0; offset < block.length; offset += 1) {
-        if (changedLines[start + offset] !== block[offset]) {
-          matchesBlock = false;
-          break;
-        }
-      }
-
-      if (matchesBlock) {
+      if (matchesBlockWindow(changedRecords, blockRecords, start)) {
         matches.push({
           indexes: Array.from({ length: block.length }, (_, i) => start + i),
         });
@@ -513,4 +650,76 @@ function findBlockMatches(changedLines, snippetBlocks) {
   }
 
   return matches;
+}
+
+function buildBlockLineRecord(value) {
+  const text = normalizeWhitespace(value);
+  return {
+    text,
+    signature: createStructuralSignature(text),
+    fingerprint: createTokenFingerprint(text),
+  };
+}
+
+function matchesBlockWindow(changedRecords, blockRecords, start) {
+  let matchesExactly = true;
+  let structuralMatches = 0;
+  let totalScore = 0;
+
+  for (let offset = 0; offset < blockRecords.length; offset += 1) {
+    const changed = changedRecords[start + offset];
+    const snippet = blockRecords[offset];
+    if (!changed || !snippet) {
+      return false;
+    }
+
+    if (changed.text !== snippet.text) {
+      matchesExactly = false;
+    }
+
+    const score = calculateBlockLineSimilarity(changed, snippet);
+    totalScore += score;
+    if (changed.signature === snippet.signature || score >= BLOCK_LINE_SIMILARITY_THRESHOLD) {
+      structuralMatches += 1;
+    }
+  }
+
+  if (matchesExactly) {
+    return true;
+  }
+
+  const averageScore = totalScore / Math.max(blockRecords.length, 1);
+  const structuralRatio = structuralMatches / Math.max(blockRecords.length, 1);
+  return averageScore >= BLOCK_LINE_SIMILARITY_THRESHOLD && structuralRatio >= BLOCK_SIGNATURE_MATCH_RATIO;
+}
+
+function calculateBlockLineSimilarity(left, right) {
+  if (!left || !right) {
+    return 0;
+  }
+  if (left.text === right.text) {
+    return 1;
+  }
+  if (left.signature && left.signature === right.signature) {
+    return 0.9;
+  }
+  return calculateTokenOverlap(left.fingerprint, right.fingerprint);
+}
+
+function calculateTokenOverlap(leftFingerprint, rightFingerprint) {
+  const left = new Set(String(leftFingerprint || "").split("|").filter(Boolean));
+  const right = new Set(String(rightFingerprint || "").split("|").filter(Boolean));
+  if (left.size === 0 || right.size === 0) {
+    return 0;
+  }
+
+  let intersection = 0;
+  for (const token of left) {
+    if (right.has(token)) {
+      intersection += 1;
+    }
+  }
+
+  const union = new Set([...left, ...right]).size;
+  return union > 0 ? intersection / union : 0;
 }

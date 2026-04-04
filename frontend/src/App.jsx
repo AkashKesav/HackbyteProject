@@ -18,8 +18,22 @@ export default function App() {
 
   useEffect(() => {
     void loadDashboard();
-    const interval = window.setInterval(() => void loadDashboard(), 5000);
-    return () => window.clearInterval(interval);
+    const interval = window.setInterval(() => void loadDashboard(), 2000);
+    const refreshOnFocus = () => void loadDashboard();
+    const refreshOnVisible = () => {
+      if (document.visibilityState === "visible") {
+        void loadDashboard();
+      }
+    };
+
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshOnVisible);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshOnVisible);
+    };
   }, []);
 
   useEffect(() => {
@@ -96,6 +110,8 @@ export default function App() {
   const latestReceipt = dashboard.latestCommitReceipt || dashboard.latestReceipt;
   const receiptContribution = latestReceipt?.modelEvidence?.contribution ?? null;
   const receiptCopilot = latestReceipt?.copilotContribution ?? latestReceipt?.modelEvidence?.copilotContribution ?? null;
+  const receiptModel = latestReceipt?.modelEvidence?.model || latestCapture?.model || "unknown";
+  const dependencyAudit = latestReceipt?.dependencyAudit || null;
   const github = dashboard.github;
   const recentCommits = Array.isArray(dashboard.recentCommits) ? dashboard.recentCommits : [];
   const repoName = dashboard.repo.fullName || dashboard.repo.repoName || "unknown-repo";
@@ -134,6 +150,7 @@ export default function App() {
           <SidebarSection title="Summary">
             <SidebarMetric label="AI %" value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"} />
             <SidebarMetric label="Copilot %" value={receiptCopilot ? `${receiptCopilot.estimatedAiPercentage}%` : "--"} />
+            <SidebarMetric label="CVEs" value={dependencyAudit ? String(dependencyAudit.findingCount || 0) : "--"} />
             <SidebarMetric label="Events" value={String(dashboard.proxy.totalEvents || 0)} />
             <SidebarMetric label="Contribs" value={String(dashboard.analytics.contributors.length)} />
           </SidebarSection>
@@ -198,7 +215,7 @@ export default function App() {
             <StatCard
               label="Copilot use"
               value={receiptCopilot ? `${receiptCopilot.estimatedAiPercentage}%` : "--"}
-              sub={latestReceipt?.modelEvidence?.method || "no method"}
+              sub={`${receiptModel} | ${latestReceipt?.modelEvidence?.method || "no method"}`}
               tone="text-[#f5a623]"
             />
             <StatCard
@@ -263,6 +280,7 @@ export default function App() {
                     <MetricRow label="Authored" value={formatDateTime(dashboard.latestCommit?.authoredAt)} />
                     <MetricRow label="AI usage" value={receiptContribution ? `${receiptContribution.estimatedAiPercentage}%` : "--"} />
                     <MetricRow label="Copilot usage" value={receiptCopilot ? `${receiptCopilot.estimatedAiPercentage}%` : "--"} />
+                    <MetricRow label="Model" value={receiptModel} />
                     <MetricRow
                       label="Matched lines"
                       value={receiptContribution ? `${receiptContribution.aiMatchedLines}/${receiptContribution.totalChangedLines}` : "0/0"}
@@ -272,6 +290,16 @@ export default function App() {
                       label="Semgrep findings"
                       value={latestReceipt.semgrep?.available ? String(latestReceipt.semgrep?.findingCount || 0) : latestReceipt.semgrep?.error || "unavailable"}
                     />
+                    <MetricRow label="Semgrep severity" value={latestReceipt.semgrep?.highestSeverity || "none"} />
+                    <MetricRow
+                      label="Dependency CVEs"
+                      value={dependencyAudit?.available ? String(dependencyAudit.findingCount || 0) : dependencyAudit?.error || "unavailable"}
+                    />
+                    <MetricRow
+                      label="Affected packages"
+                      value={dependencyAudit?.available ? String(dependencyAudit.affectedPackageCount || 0) : "--"}
+                    />
+                    <MetricRow label="Dependency severity" value={dependencyAudit?.highestSeverity || "none"} />
                     <div className="space-y-2">
                       {(latestReceipt.modelEvidence?.evidence ?? []).length === 0 ? (
                         <EmptyState text="No evidence text was produced for the latest receipt." compact />
@@ -297,6 +325,25 @@ export default function App() {
                             <div className="mt-1 text-xs text-[#8492b4]">
                               {finding.path}
                               {finding.line ? `:${finding.line}` : ""}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {(dependencyAudit?.findings ?? []).length > 0 ? (
+                      <div className="space-y-2">
+                        {dependencyAudit.findings.slice(0, 5).map((finding) => (
+                          <div
+                            key={`${finding.project}-${finding.package}-${finding.advisory || finding.title}`}
+                            className="rounded-xl border border-[#252c3e] bg-[#181d28] px-4 py-3 text-sm text-[#c7d1eb]"
+                          >
+                            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#4a5578]">
+                              {finding.severity} | {finding.package}
+                            </div>
+                            <div className="mt-1 text-[#edf0fa]">{finding.advisory || finding.title}</div>
+                            <div className="mt-1 text-xs text-[#8492b4]">
+                              {finding.project || "root"}
+                              {finding.fixAvailable ? ` | fix ${finding.fixAvailable}` : ""}
                             </div>
                           </div>
                         ))}

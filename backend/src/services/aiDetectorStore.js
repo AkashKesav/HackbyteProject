@@ -4,8 +4,9 @@ import { promises as fs } from "node:fs";
 const AI_DETECTOR_FILE = ".aidetector.json";
 const AI_DETECTOR_VERSION = 1;
 const MAX_COMMIT_HISTORY = 500;
-const DEFAULT_LINEAGE_THRESHOLD = 60;
+const DEFAULT_LINEAGE_THRESHOLD = 40;
 const MIN_LINES_FOR_LINEAGE = 5;
+const DEFAULT_SIMILARITY_THRESHOLD = 0.6;
 
 export function getAiDetectorPath(projectRoot) {
   return path.join(projectRoot, AI_DETECTOR_FILE);
@@ -49,11 +50,16 @@ export function calculateTaggedLineCoverage(lineRecords, aiDetectorState, option
   const records = Array.isArray(lineRecords) ? lineRecords : [];
   const providerFilter = options.provider ? String(options.provider).toLowerCase() : null;
   const lineageThreshold = Number(options.lineageThreshold || DEFAULT_LINEAGE_THRESHOLD);
+  const similarityThreshold = Number(options.similarityThreshold || DEFAULT_SIMILARITY_THRESHOLD);
   const matchedIndexes = new Set();
   const matchedLines = [];
   const dominantFiles = new Map();
   const exactQueues = new Map();
+  const signatureQueues = new Map();
+  const similarityCandidates = new Map();
   let exactMatchedLines = 0;
+  let structuralMatchedLines = 0;
+  let similarityMatchedLines = 0;
   let lineageMatchedLines = 0;
 
   for (let index = 0; index < records.length; index += 1) {
@@ -71,12 +77,34 @@ export function calculateTaggedLineCoverage(lineRecords, aiDetectorState, option
     const queueKey = `${providerFilter || "all"}:${filePath}`;
     if (!exactQueues.has(queueKey)) {
       exactQueues.set(queueKey, buildTagQueue(fileState.lineTags, providerFilter));
+      signatureQueues.set(queueKey, buildMetadataQueue(fileState.lineTags, "signature", providerFilter));
+      similarityCandidates.set(queueKey, buildSimilarityCandidates(fileState.lineTags, providerFilter));
     }
 
     const exactQueue = exactQueues.get(queueKey);
     if (shiftQueuedEntry(exactQueue, record.hash)) {
       matchedIndexes.add(index);
       exactMatchedLines += 1;
+      matchedLines.push(record.text);
+      continue;
+    }
+
+    const signatureQueue = signatureQueues.get(queueKey);
+    if (consumeBestQueuedMatch(signatureQueue, record, similarityThreshold)) {
+      matchedIndexes.add(index);
+      structuralMatchedLines += 1;
+      matchedLines.push(record.text);
+      continue;
+    }
+
+    const similarCandidate = consumeBestSimilarCandidate(
+      similarityCandidates.get(queueKey),
+      record,
+      similarityThreshold
+    );
+    if (similarCandidate) {
+      matchedIndexes.add(index);
+      similarityMatchedLines += 1;
       matchedLines.push(record.text);
       continue;
     }
@@ -101,6 +129,8 @@ export function calculateTaggedLineCoverage(lineRecords, aiDetectorState, option
     totalChangedLines: records.length,
     aiMatchedLines: matchedIndexes.size,
     exactMatchedLines,
+    structuralMatchedLines,
+    similarityMatchedLines,
     lineageMatchedLines,
     matchedIndexes,
     matchedLines: matchedLines.slice(0, 20),
@@ -217,7 +247,7 @@ function isProjectRelativePath(value) {
 }
 
 function normalizeImportedFileState(fileState) {
-  const lineTags = Array.isArray(fileState?.lineTags) ? fileState.lineTags : [];
+  const lineTags = Array.isArray(fileState?.lineTags) ? fileState.lineTags.map(normalizeLineTag) : [];
   const totalMeaningfulLines = lineTags.length > 0 ? lineTags.length : Number(fileState?.totalMeaningfulLines || 0);
   const aiTaggedLines = lineTags.length > 0
     ? lineTags.filter((tag) => tag?.ai).length
@@ -281,6 +311,209 @@ function buildTagQueue(lineTags, providerFilter) {
     queue.get(hash).push(tag);
   }
   return queue;
+}
+
+function buildMetadataQueue(lineTags, keyName, providerFilter) {
+  const queue = new Map();
+  for (const tag of Array.isArray(lineTags) ? lineTags : []) {
+    const normalizedTag = normalizeLineTag(tag);
+    if (!normalizedTag?.ai) {
+      continue;
+    }
+    if (providerFilter && String(normalizedTag.provider || "").toLowerCase() !== providerFilter) {
+      continue;
+    }
+    const key = String(normalizedTag?.[keyName] || "");
+    if (!key) {
+      continue;
+    }
+    if (!queue.has(key)) {
+      queue.set(key, []);
+    }
+    queue.get(key).push(normalizedTag);
+  }
+  return queue;
+}
+
+function buildSimilarityCandidates(lineTags, providerFilter) {
+  return (Array.isArray(lineTags) ? lineTags : [])
+    .filter((tag) => tag?.ai)
+    .filter((tag) => !providerFilter || String(tag.provider || "").toLowerCase() === providerFilter)
+    .map((tag) => normalizeLineTag(tag))
+    .filter((tag) => tag.hash || tag.signature || tag.normalized);
+}
+
+function consumeBestQueuedMatch(queue, record, minScore) {
+  const key = String(record?.signature || "");
+  const items = queue.get(key);
+  if (!items || items.length === 0) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestScore = minScore;
+  for (let index = 0; index < items.length; index += 1) {
+    const score = calculateLineSimilarity(record, items[index]);
+    if (score >= bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return null;
+  }
+
+  const [entry] = items.splice(bestIndex, 1);
+  if (items.length === 0) {
+    queue.delete(key);
+  }
+  return entry;
+}
+
+function consumeBestSimilarCandidate(candidates, record, minScore) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestScore = minScore;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const score = calculateLineSimilarity(record, candidates[index]);
+    if (score >= bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return null;
+  }
+
+  return candidates.splice(bestIndex, 1)[0];
+}
+
+function normalizeLineTag(tag) {
+  const normalized = normalizeLineText(tag?.normalized || tag?.preview || "");
+  return {
+    ...tag,
+    hash: String(tag?.hash || "") || hashNormalizedContent(normalized),
+    normalized,
+    signature: String(tag?.signature || "") || createStructuralSignature(normalized),
+    fingerprint: String(tag?.fingerprint || "") || createTokenFingerprint(normalized),
+  };
+}
+
+function normalizeLineRecord(record) {
+  const normalized = normalizeLineText(record?.normalized || record?.text || "");
+  return {
+    ...record,
+    text: normalized,
+    normalized,
+    hash: String(record?.hash || "") || hashNormalizedContent(normalized),
+    signature: String(record?.signature || "") || createStructuralSignature(normalized),
+    fingerprint: String(record?.fingerprint || "") || createTokenFingerprint(normalized),
+  };
+}
+
+function calculateLineSimilarity(left, right) {
+  const leftRecord = normalizeLineRecord(left);
+  const rightRecord = normalizeLineTag(right);
+  if (leftRecord.hash && rightRecord.hash && leftRecord.hash === rightRecord.hash) {
+    return 1;
+  }
+
+  const exactSignatureMatch =
+    leftRecord.signature &&
+    rightRecord.signature &&
+    leftRecord.signature === rightRecord.signature;
+  const exactFingerprintMatch =
+    leftRecord.fingerprint &&
+    rightRecord.fingerprint &&
+    leftRecord.fingerprint === rightRecord.fingerprint;
+  const tokenScore = calculateTokenOverlap(leftRecord.fingerprint, rightRecord.fingerprint);
+  const charScore = calculateCharacterOverlap(leftRecord.normalized, rightRecord.normalized);
+  const weightedScore = (tokenScore * 0.7) + (charScore * 0.3);
+
+  if (exactSignatureMatch && (tokenScore >= 0.5 || charScore >= 0.55)) {
+    return Math.max(weightedScore, 0.92);
+  }
+
+  if (exactFingerprintMatch && charScore >= 0.45) {
+    return Math.max(weightedScore, 0.84);
+  }
+
+  return weightedScore;
+}
+
+function calculateTokenOverlap(leftFingerprint, rightFingerprint) {
+  const left = new Set(String(leftFingerprint || "").split("|").filter(Boolean));
+  const right = new Set(String(rightFingerprint || "").split("|").filter(Boolean));
+  if (left.size === 0 || right.size === 0) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) {
+      overlap += 1;
+    }
+  }
+  return overlap / Math.max(left.size, right.size);
+}
+
+function calculateCharacterOverlap(leftValue, rightValue) {
+  const left = String(leftValue || "");
+  const right = String(rightValue || "");
+  if (!left || !right) {
+    return 0;
+  }
+  if (left === right) {
+    return 1;
+  }
+
+  const shortestLength = Math.min(left.length, right.length);
+  let samePrefix = 0;
+  while (samePrefix < shortestLength && left[samePrefix] === right[samePrefix]) {
+    samePrefix += 1;
+  }
+
+  let sameSuffix = 0;
+  while (
+    sameSuffix < shortestLength &&
+    left[left.length - 1 - sameSuffix] === right[right.length - 1 - sameSuffix]
+  ) {
+    sameSuffix += 1;
+  }
+
+  return (samePrefix + sameSuffix) / (left.length + right.length);
+}
+
+function normalizeLineText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function hashNormalizedContent(value) {
+  const normalized = normalizeLineText(value);
+  return normalized ? `line:${normalized}` : "";
+}
+
+function createStructuralSignature(value) {
+  return normalizeLineText(value)
+    .toLowerCase()
+    .replace(/\b0x[a-f0-9]+\b/gi, "<num>")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "<num>")
+    .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "<str>");
+}
+
+function createTokenFingerprint(value) {
+  return [...new Set(
+    createStructuralSignature(value).match(/[a-z_][a-z0-9_$]*/gi) || []
+  )]
+    .map((token) => token.toLowerCase())
+    .sort()
+    .slice(0, 24)
+    .join("|");
 }
 
 function shiftQueuedEntry(queue, hash) {

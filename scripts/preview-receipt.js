@@ -10,24 +10,29 @@ async function main() {
   // Optional single-file mode keeps the preview scoped to one changed file.
   const targetPath = resolveRequestedFile(repoRoot, process.argv.slice(2));
   const diffText = buildPreviewDiff(repoRoot, targetPath);
+  const hasDiff = Boolean(diffText.trim());
+  const scanMode = targetPath && !hasDiff ? "clean-file-scan" : "diff-preview";
 
-  if (!diffText.trim()) {
+  if (!hasDiff && !targetPath) {
     console.log(
-      targetPath
-        ? `No staged or working-tree diff found for ${targetPath}.`
-        : "No staged or working-tree diff found."
+      "No staged or working-tree diff found."
     );
     return;
   }
 
   if (targetPath) {
     console.log(`Preview scope: file=${targetPath}`);
+    if (!hasDiff) {
+      console.log("Preview mode: clean-file-scan (no git diff found, scanning the file directly)");
+    }
   }
 
   const payload = {
-    diffText,
-    receiptUrl: "preview://working-tree",
+    diffText: hasDiff ? diffText : "",
+    receiptUrl: scanMode === "clean-file-scan" ? "preview://file-scan" : "preview://working-tree",
     targetPath: targetPath || null,
+    filePaths: targetPath ? [targetPath] : null,
+    scanMode,
   };
 
   try {
@@ -63,6 +68,8 @@ async function main() {
     if (contribution.sampleTooSmall) {
       console.log("AI contribution sample is too small for a stable percentage.");
     }
+    printSemgrepSummary(body.semgrep);
+    printDependencyAuditSummary(body.dependencyAudit);
 
     if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
       for (const line of evidence.evidence) {
@@ -233,6 +240,41 @@ function printUsage() {
   console.log("  node scripts/preview-receipt.js");
   console.log("  node scripts/preview-receipt.js backend/src/server.js");
   console.log("  node scripts/preview-receipt.js demo-vulnerabilities.js");
+}
+
+function printSemgrepSummary(semgrep) {
+  if (!semgrep) {
+    return;
+  }
+
+  const configs = Array.isArray(semgrep.configs) && semgrep.configs.length > 0
+    ? semgrep.configs.join(", ")
+    : semgrep.config || "unknown";
+  console.log(
+    `Semgrep: findings=${semgrep.findingCount || 0} highest=${semgrep.highestSeverity || "none"} configs=${configs}`
+  );
+
+  for (const finding of Array.isArray(semgrep.findings) ? semgrep.findings.slice(0, 3) : []) {
+    console.log(
+      `- [${finding.severity || "unknown"}] ${finding.rule || "unknown-rule"} ${finding.path || "unknown"}${finding.line ? `:${finding.line}` : ""}`
+    );
+  }
+}
+
+function printDependencyAuditSummary(dependencyAudit) {
+  if (!dependencyAudit) {
+    return;
+  }
+
+  console.log(
+    `Dependency CVEs: findings=${dependencyAudit.findingCount || 0} packages=${dependencyAudit.affectedPackageCount || 0} highest=${dependencyAudit.highestSeverity || "none"}`
+  );
+
+  for (const finding of Array.isArray(dependencyAudit.findings) ? dependencyAudit.findings.slice(0, 3) : []) {
+    console.log(
+      `- [${finding.severity || "unknown"}] ${finding.package || "unknown-package"} ${finding.advisory || finding.title || "unknown-advisory"}${finding.project ? ` (${finding.project})` : ""}`
+    );
+  }
 }
 
 if (require.main === module) {

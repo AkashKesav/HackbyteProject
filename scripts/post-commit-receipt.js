@@ -42,6 +42,8 @@ function main() {
       if (contribution.sampleTooSmall) {
         console.log("AI contribution sample is too small for a stable percentage.");
       }
+      printSemgrepSummary(body.semgrep);
+      printDependencyAuditSummary(body.dependencyAudit);
       if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
         for (const line of evidence.evidence) {
           console.log(`- ${line}`);
@@ -68,6 +70,41 @@ function execGit(args) {
     cwd: process.cwd(),
     encoding: "utf8",
   });
+}
+
+function printSemgrepSummary(semgrep) {
+  if (!semgrep) {
+    return;
+  }
+
+  const configs = Array.isArray(semgrep.configs) && semgrep.configs.length > 0
+    ? semgrep.configs.join(", ")
+    : semgrep.config || "unknown";
+  console.log(
+    `Semgrep: findings=${semgrep.findingCount || 0} highest=${semgrep.highestSeverity || "none"} configs=${configs}`
+  );
+
+  for (const finding of Array.isArray(semgrep.findings) ? semgrep.findings.slice(0, 3) : []) {
+    console.log(
+      `- [${finding.severity || "unknown"}] ${finding.rule || "unknown-rule"} ${finding.path || "unknown"}${finding.line ? `:${finding.line}` : ""}`
+    );
+  }
+}
+
+function printDependencyAuditSummary(dependencyAudit) {
+  if (!dependencyAudit) {
+    return;
+  }
+
+  console.log(
+    `Dependency CVEs: findings=${dependencyAudit.findingCount || 0} packages=${dependencyAudit.affectedPackageCount || 0} highest=${dependencyAudit.highestSeverity || "none"}`
+  );
+
+  for (const finding of Array.isArray(dependencyAudit.findings) ? dependencyAudit.findings.slice(0, 3) : []) {
+    console.log(
+      `- [${finding.severity || "unknown"}] ${finding.package || "unknown-package"} ${finding.advisory || finding.title || "unknown-advisory"}${finding.project ? ` (${finding.project})` : ""}`
+    );
+  }
 }
 
 main();

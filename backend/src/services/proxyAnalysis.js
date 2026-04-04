@@ -120,7 +120,7 @@ function extractPromptText(body) {
 
 function extractModel(body) {
   if (!body || typeof body !== "object") return null;
-  return body.model || body.model_name || null;
+  return body.model || body.model_name || body.metadata?.model || body.metadata?.model_name || body.metadata?.modelName || null;
 }
 
 function scoreRepoRelation(promptText, repoContext) {
