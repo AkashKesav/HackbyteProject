@@ -268,9 +268,20 @@ app.get('/debug/integrations', async (_req, res) => {
   });
 });
 
-app.listen(env.PORT, () => {
+const server = app.listen(env.PORT, () => {
   // eslint-disable-next-line no-console
   console.log(`[lcn-backend] listening on http://localhost:${env.PORT}`);
+});
+
+server.on('error', (error: NodeJS.ErrnoException) => {
+  if (error?.code === 'EADDRINUSE') {
+    console.error(`[lcn-backend] port ${env.PORT} is already in use. Stop the existing process or choose a different PORT.`);
+    process.exit(1);
+    return;
+  }
+
+  console.error('[lcn-backend] failed to start', error);
+  process.exit(1);
 });
 
 

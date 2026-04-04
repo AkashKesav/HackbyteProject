@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -15,13 +16,13 @@ const narratorRoot = path.join(
 
 const modes = {
   narrator: [
-    { name: "narrator-backend", cwd: path.join(narratorRoot, "apps", "backend"), color: "\u001b[36m" },
+    { name: "narrator-backend", cwd: path.join(narratorRoot, "apps", "backend"), color: "\u001b[36m", port: 8787 },
     { name: "narrator-web", cwd: path.join(narratorRoot, "apps", "web"), color: "\u001b[35m" },
   ],
   all: [
-    { name: "hackbyte-backend", cwd: path.join(projectRoot, "backend"), color: "\u001b[32m" },
+    { name: "hackbyte-backend", cwd: path.join(projectRoot, "backend"), color: "\u001b[32m", port: 4000 },
     { name: "hackbyte-frontend", cwd: path.join(projectRoot, "frontend"), color: "\u001b[33m" },
-    { name: "narrator-backend", cwd: path.join(narratorRoot, "apps", "backend"), color: "\u001b[36m" },
+    { name: "narrator-backend", cwd: path.join(narratorRoot, "apps", "backend"), color: "\u001b[36m", port: 8787 },
     { name: "narrator-web", cwd: path.join(narratorRoot, "apps", "web"), color: "\u001b[35m" },
   ],
 };
@@ -38,6 +39,13 @@ const children = [];
 let shuttingDown = false;
 
 for (const service of services) {
+  if (service.port && (await isPortInUse(service.port))) {
+    process.stdout.write(
+      `${service.color}[${service.name}]\u001b[0m port ${service.port} is already in use, assuming this service is already running and skipping a duplicate start.\n`
+    );
+    continue;
+  }
+
   const child = spawn("npm", ["run", "dev"], {
     cwd: service.cwd,
     shell: true,
@@ -78,4 +86,19 @@ function shutdown(exitCode) {
     }
   }
   process.exit(exitCode);
+}
+
+function isPortInUse(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+
+    socket.once("connect", () => {
+      socket.end();
+      resolve(true);
+    });
+
+    socket.once("error", () => {
+      resolve(false);
+    });
+  });
 }

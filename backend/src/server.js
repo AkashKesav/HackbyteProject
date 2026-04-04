@@ -15,7 +15,7 @@ import {
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
 import { buildModelEvidenceReceipt } from "./services/modelEvidence.js";
 import { enrichReceiptWithIntegrations } from "./services/receiptIntegrations.js";
-import { upsertReceiptHistory } from './db.js';
+import { upsertReceiptHistory } from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,9 +71,11 @@ const state = {
   githubStates: new Map(),
 };
 
+state.receiptHistory = upsertReceiptHistory(state.receiptHistory, state.latestReceipt);
 state.proxy.totalEvents = state.captures.length;
 state.proxy.lastEventAt = state.captures[0]?.capturedAt ?? null;
 state.proxy.healthy = state.captures.length > 0;
+state.recentCommits = await buildRecentCommitFeed();
 
 app.get("/api/health", async (_req, res) => {
   await refreshRepoContextIfNeeded(true);
@@ -307,8 +309,8 @@ app.post("/api/receipt", async (req, res) => {
     updatedAt: new Date().toISOString(),
     commitHash: req.body?.commitHash || null,
   };
+  state.receiptHistory = upsertReceiptHistory(state.receiptHistory, state.latestReceipt);
   await persistReceipt(state.latestReceipt);
-  upsertReceiptHistory(state.latestReceipt);
   await persistReceiptHistory(state.receiptHistory);
   res.status(201).json({
     ok: true,
@@ -435,7 +437,7 @@ app.post("/api/github/logout", async (_req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Commit Confessional backend listening on http://localhost:${PORT}`);
   console.log(`Firefox extension ingest available at http://127.0.0.1:${PORT}/api/extension/events`);
   console.log(`Simulation proxy available at http://localhost:${PORT}/proxy/<provider>/...`);
@@ -445,6 +447,18 @@ app.listen(PORT, () => {
   } else {
     console.log("Local MITM proxy disabled. Set ENABLE_LOCAL_PROXY=true to start it.");
   }
+});
+
+server.on("error", (error) => {
+  if (error?.code === "EADDRINUSE") {
+    console.error(`Commit Confessional backend could not start because port ${PORT} is already in use.`);
+    console.error("Stop the existing process on that port or start this backend with a different PORT value.");
+    process.exit(1);
+    return;
+  }
+
+  console.error("Commit Confessional backend failed to start.", error);
+  process.exit(1);
 });
 
 if (ENABLE_LOCAL_PROXY) {
@@ -658,23 +672,45 @@ async function fetchGithubRepoCommits(limit = 12) {
 }
 
 function matchReceiptToCommit(commit) {
-  if (!state.latestReceipt || !commit?.hash) {
+  const commitHash = normalizeCommitHash(commit?.hash);
+  if (!commitHash) {
     return null;
   }
 
-  const receiptHash = String(state.latestReceipt.commitHash || "").toLowerCase();
-  const commitHash = String(commit.hash || "").toLowerCase();
-  if (!receiptHash || !commitHash) {
-    return null;
+  for (const receipt of listCommitReceipts()) {
+    if (commitHashesMatch(commitHash, receipt?.commitHash)) {
+      return receipt;
+    }
   }
 
-  return commitHash === receiptHash || commitHash.startsWith(receiptHash) || receiptHash.startsWith(commitHash)
-    ? state.latestReceipt
-    : null;
+  return null;
 }
 
 function findReceiptForCommit(commit) {
   return matchReceiptToCommit(commit);
+}
+
+function listCommitReceipts() {
+  return upsertReceiptHistory(state.receiptHistory, state.latestReceipt);
+}
+
+function commitHashesMatch(left, right) {
+  const normalizedLeft = normalizeCommitHash(left);
+  const normalizedRight = normalizeCommitHash(right);
+
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return (
+    normalizedLeft === normalizedRight ||
+    normalizedLeft.startsWith(normalizedRight) ||
+    normalizedRight.startsWith(normalizedLeft)
+  );
+}
+
+function normalizeCommitHash(value) {
+  return String(value || "").trim().toLowerCase();
 }
 
 function cleanupGithubStates() {

@@ -5,7 +5,16 @@
 // Why did the AI go to therapy? It had too many issues to commit.
 // When the therapist asked about its problems, it said, "I have merge conflicts with myself."
 // The therapist replied, "That's nothing—you should see what my git history looks like."
+//
+// How many developers does it take to change a Copilot bug?
+// None—that's a Copilot problem, not our problem.
+// But seriously, if Copilot writes a bug, does it count as code review?
+// Only if the code reviews itself and says "Ship it!" 🚀
 
+
+//ajjjjjjjjjjjjjjjjjjjjjj
+//jsldfkjskljfklsjfklsfsj
+//sdjflksjfklsjjjjjjjjjj
 const vscode = require("vscode");
 const { execFile } = require("node:child_process");
 const fs = require("node:fs");

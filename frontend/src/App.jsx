@@ -381,7 +381,7 @@ export default function App() {
                 <Panel title="Next step" subtitle="What finishes the loop from detection to proof.">
                   <p className="text-sm leading-6 text-[#8492b4]">
                     Your local proxy should post captures to <code className="rounded bg-[#181d28] px-1.5 py-0.5 text-[#edf0fa]">/api/proxy/events</code>.
-                    Once trusted TLS interception is enabled and receipt history is expanded, every recent commit can carry its own AI percentage.
+                    Commit receipts are now retained per hash, so every analyzed commit can keep its own AI percentage in the feed instead of only the latest one.
                   </p>
                 </Panel>
               ) : null}
