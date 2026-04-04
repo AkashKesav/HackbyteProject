@@ -18,6 +18,8 @@
     "build:narrator:web": "npm run build --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/web",
     "install:firefox-native": "node firefox-extension/install-native-host.js",
     "receipt:post-commit": "node scripts/post-commit-receipt.js",
-    "receipt:preview": "node scripts/preview-receipt.js"
+    "receipt:preview": "node scripts/preview-receipt.js",
+    "preview:ai": "node scripts/preview-receipt.js",
+    "test:latest-receipt": "node scripts/post-commit-receipt.js"
   }
 }

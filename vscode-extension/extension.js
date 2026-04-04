@@ -280,6 +280,40 @@ function registerCommands(context) {
     outputChannel.appendLine(`Clipboard length: ${(await readClipboardSafe()).length}`);
     outputChannel.show(true);
   }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.testLatestReceipt", async () => {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      void vscode.window.showErrorMessage("No workspace folder is open.");
+      return;
+    }
+
+    try {
+      await publishReceiptForRepo(folder.uri.fsPath, true);
+      outputChannel.show(true);
+      void vscode.window.showInformationMessage("Latest receipt posted. Check Commit Confessional output.");
+    } catch (error) {
+      log(`Manual receipt test failed: ${error?.message || String(error)}`);
+      outputChannel.show(true);
+      void vscode.window.showErrorMessage("Receipt test failed. Check Commit Confessional output.");
+    }
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.previewAiPercentage", async () => {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (!folder) {
+      void vscode.window.showErrorMessage("No workspace folder is open.");
+      return;
+    }
+
+    try {
+      await previewReceiptForRepo(folder.uri.fsPath);
+      outputChannel.show(true);
+      void vscode.window.showInformationMessage("Preview AI percentage generated. Check Commit Confessional output.");
+    } catch (error) {
+      log(`Preview AI percentage failed: ${error?.message || String(error)}`);
+      outputChannel.show(true);
+      void vscode.window.showErrorMessage("Preview AI percentage failed. Check Commit Confessional output.");
+    }
+  }));
   context.subscriptions.push(vscode.commands.registerCommand("lcn.pingBackend", async () => {
     const cfg = getNarratorConfig();
     try {
@@ -303,6 +337,7 @@ function registerListeners(context, sidebar) {
       pendingToolTime = Date.now();
       appendJsonLine({ label: "copilot-command", provider: "copilot", command: event.command, tool: toolName });
       log(`copilot-command: ${event.command} -> ${toolName}`);
+      outputChannel.show(true);
     }));
   }
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => void handleDocumentChange(event)));
@@ -347,6 +382,11 @@ async function handleDocumentChange(event) {
     contentText: isPaste ? clipboardText : insertedText,
     tool: currentTool(),
   });
+  log(
+    `${source}: ${path.basename(documentPath)} lines=${insertedText.split(/\r?\n/).length} tool=${currentTool()} preview=${buildPreview(
+      isPaste ? clipboardText : insertedText
+    )}`
+  );
 }
 
 async function handleNarratorSave(doc, sidebar) {
@@ -436,23 +476,132 @@ async function pollWorkspaceCommits(initial = false) {
     }
 
     try {
-      const diffText = await runGit(["show", "--format=", "--unified=0", headSha], repoRoot);
-      const latestCommit = await runGit(["show", "-s", "--format=%s", headSha], repoRoot);
-      await fetch(`${trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "")}/api/receipt`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          commitHash: headSha,
-          diffText,
-          receiptUrl: `commit://${headSha}`,
-          commitMessage: latestCommit.trim(),
-        }),
-      });
-      log(`Commit receipt published for ${headSha.slice(0, 8)}`);
+      await publishReceiptForRepo(repoRoot);
     } catch (error) {
       log(`Commit receipt publish failed: ${error?.message || String(error)}`);
     }
   }
+}
+
+async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
+  const commitHash = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim();
+  if (!commitHash) {
+    throw new Error("Unable to resolve HEAD.");
+  }
+
+  const diffText = await runGit(["show", "--format=", "--unified=0", commitHash], repoRoot);
+  const latestCommit = await runGit(["show", "-s", "--format=%s", commitHash], repoRoot);
+  const addedLineSamples = extractAddedLineSamples(diffText, 2);
+  const receiptBaseUrl = trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
+  const response = await fetch(`${receiptBaseUrl}/api/receipt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      commitHash,
+      diffText,
+      receiptUrl: `commit://${commitHash}`,
+      commitMessage: latestCommit.trim(),
+    }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.message || `Receipt request failed with ${response.status}`);
+  }
+
+  const evidence = body.modelEvidence || {};
+  const contribution = evidence.contribution || {};
+  const copilotContribution = body.copilotContribution || evidence.copilotContribution || {};
+  log(`${forceCurrentHead ? "Manual" : "Auto"} receipt for ${commitHash.slice(0, 8)} ${latestCommit.trim()}`);
+  log(
+    `AI contribution: matched=${contribution.aiMatchedLines || 0}/${contribution.totalChangedLines || 0} percentage=${contribution.estimatedAiPercentage || 0}% confidence=${contribution.confidenceLevel || "LOW"}`
+  );
+  log(
+    `Copilot contribution: matched=${copilotContribution.aiMatchedLines || 0}/${copilotContribution.totalChangedLines || 0} percentage=${copilotContribution.estimatedAiPercentage || 0}% confidence=${copilotContribution.confidenceLevel || "LOW"} events=${copilotContribution.eventCount || 0}`
+  );
+  if (addedLineSamples.length > 0) {
+    log("Added line samples:");
+    for (const line of addedLineSamples) {
+      log(`  + ${line}`);
+    }
+  } else {
+    log("Added line samples: none");
+  }
+  if (Array.isArray(contribution.matchedLineSamples) && contribution.matchedLineSamples.length) {
+    log("AI matched line samples:");
+    for (const line of contribution.matchedLineSamples.slice(0, 2)) {
+      log(`  = ${line}`);
+    }
+  }
+  if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
+    for (const line of evidence.evidence) {
+      log(`evidence: ${line}`);
+    }
+  }
+  return body;
+}
+
+async function previewReceiptForRepo(repoRoot) {
+  const stagedDiff = await runGit(["diff", "--cached", "--unified=0"], repoRoot).catch(() => "");
+  const workingDiff = await runGit(["diff", "--unified=0"], repoRoot).catch(() => "");
+  const diffText = [stagedDiff, workingDiff].filter(Boolean).join("\n");
+
+  if (!diffText.trim()) {
+    throw new Error("No staged or working-tree diff found.");
+  }
+
+  const addedLineSamples = extractAddedLineSamples(diffText, 2);
+  const receiptBaseUrl = trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
+  const response = await fetch(`${receiptBaseUrl}/api/receipt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      diffText,
+      receiptUrl: "preview://working-tree",
+    }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.message || `Preview receipt request failed with ${response.status}`);
+  }
+
+  const evidence = body.modelEvidence || {};
+  const contribution = evidence.contribution || {};
+  const copilotContribution = body.copilotContribution || evidence.copilotContribution || {};
+  log("Preview AI percentage");
+  log(
+    `AI contribution: matched=${contribution.aiMatchedLines || 0}/${contribution.totalChangedLines || 0} percentage=${contribution.estimatedAiPercentage || 0}% confidence=${contribution.confidenceLevel || "LOW"}`
+  );
+  log(
+    `Copilot contribution: matched=${copilotContribution.aiMatchedLines || 0}/${copilotContribution.totalChangedLines || 0} percentage=${copilotContribution.estimatedAiPercentage || 0}% confidence=${copilotContribution.confidenceLevel || "LOW"} events=${copilotContribution.eventCount || 0}`
+  );
+  if (contribution.sampleTooSmall) {
+    log("AI contribution sample is too small for a stable percentage.");
+  }
+  if (copilotContribution.sampleTooSmall) {
+    log("Copilot contribution sample is too small for a stable percentage.");
+  }
+  if (addedLineSamples.length > 0) {
+    log("Added line samples:");
+    for (const line of addedLineSamples) {
+      log(`  + ${line}`);
+    }
+  } else {
+    log("Added line samples: none");
+  }
+  if (Array.isArray(contribution.matchedLineSamples) && contribution.matchedLineSamples.length) {
+    log("AI matched line samples:");
+    for (const line of contribution.matchedLineSamples.slice(0, 2)) {
+      log(`  = ${line}`);
+    }
+  }
+  if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
+    for (const line of evidence.evidence) {
+      log(`evidence: ${line}`);
+    }
+  }
+  return body;
 }
 
 async function emitCommitEvent(label, payload) {
@@ -497,6 +646,7 @@ async function pollCopilotLogs(initial = false) {
       pendingToolTime = Date.now();
     }
     appendJsonLine({ label: "model-query", source: "copilot-log", provider: "copilot", model, rawLine: normalizedLine });
+    log(`copilot-log: model=${model} tool=${tool || currentTool()} line=${buildPreview(normalizedLine)}`);
   }
 }
 
@@ -665,6 +815,15 @@ function normalizeWhitespace(value) {
 function buildPreview(value) {
   const text = normalizeWhitespace(value);
   return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+}
+
+function extractAddedLineSamples(diffText, limit = 2) {
+  return String(diffText || "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => normalizeWhitespace(line.slice(1)))
+    .filter(Boolean)
+    .slice(0, Math.max(0, limit));
 }
 
 function hashContent(value) {

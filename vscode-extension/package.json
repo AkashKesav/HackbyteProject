@@ -51,6 +51,14 @@
         "title": "Commit Confessional: Debug Status Report"
       },
       {
+        "command": "commitConfessional.testLatestReceipt",
+        "title": "Commit Confessional: Test Latest Receipt"
+      },
+      {
+        "command": "commitConfessional.previewAiPercentage",
+        "title": "Commit Confessional: Preview AI Percentage"
+      },
+      {
         "command": "lcn.pingBackend",
         "title": "LCN: Ping Backend"
       },

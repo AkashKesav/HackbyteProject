@@ -15,6 +15,7 @@ import {
 import { analyzeProxyEvent, createMockProxyEvent } from "./services/proxyAnalysis.js";
 import { buildModelEvidenceReceipt } from "./services/modelEvidence.js";
 import { enrichReceiptWithIntegrations } from "./services/receiptIntegrations.js";
+import { upsertReceiptHistory } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
