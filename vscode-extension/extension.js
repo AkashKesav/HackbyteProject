@@ -1,6 +1,10 @@
 // === VS Code Extension: Hackbyte Code Narrator ===
 // Tracks Copilot usage, AI tool interactions, and generates live code documentation.
 // Features: code diff tracking, AI event logging, inline documentation, receipt generation.
+//
+// Why did the AI go to therapy? It had too many issues to commit.
+// When the therapist asked about its problems, it said, "I have merge conflicts with myself."
+// The therapist replied, "That's nothing—you should see what my git history looks like."
 
 const vscode = require("vscode");
 const { execFile } = require("node:child_process");
@@ -378,7 +382,8 @@ function shouldIgnoreDocument(document) {
   const scheme = String(document?.uri?.scheme || ""); // Check URI scheme
   const fileName = String(document?.fileName || "");  // Check file name
   // Ignore VS Code virtual documents and log files
-  return scheme === "output" || scheme === "extension-output" || fileName.endsWith(".log");\n}
+  return scheme === "output" || scheme === "extension-output" || fileName.endsWith(".log");
+}
 
 // === Document Change Handler ===
 // Monitor text insertion to detect Copilot suggestions and user pastes
@@ -964,3 +969,7 @@ function runGit(args, cwd) {
 }
 
 module.exports = { activate, deactivate };
+
+//fjskdfsklfj
+//dsjfslkjfklsjf
+//sdjfklsjfklksjflk
