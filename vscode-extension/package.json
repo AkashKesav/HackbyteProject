@@ -27,6 +27,10 @@
       {
         "command": "commitConfessional.listMatchingExtensions",
         "title": "Commit Confessional: List Matching AI Extensions"
+      },
+      {
+        "command": "commitConfessional.debugStatus",
+        "title": "Commit Confessional: Debug Status Report"
       }
     ],
     "configuration": {

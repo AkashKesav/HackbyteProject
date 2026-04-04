@@ -1,3 +1,5 @@
+// VS Code Extension: Commit Confessional Detector
+// Monitors and logs Copilot command usage for diagnostic analysis and event tracking.
 // This VS Code extension module provides the main entry point for the Commit Confessional detector.
 // It imports necessary Node.js modules for file system operations, path handling, and cryptography.
 // The extension uses VS Code's API to register commands and listen for editor events.
@@ -41,25 +43,36 @@ const COPILOT_COMMANDS = {
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
 };
 
+// Global variables to manage extension state and timers
+// These track output, timers, context, and user interactions throughout the extension lifecycle
+
 let outputChannel;
 let activationTimer;
 let copilotLogTimer;
 let lastPromptContext = null;
 let lastManualKeystrokeAt = 0;
+
+// Track pending tool calls and their timing for correlation with detected commands
 let pendingTool = null;
 let pendingToolTime = 0;
+let lastCopilotLogActivityAt = 0;
+
+// Maintain extension state mappings and monitor Copilot log file for real-time events
 const extensionStates = new Map();
 let watchedCopilotLogPath = null;
 let watchedCopilotLogSize = 0;
 const seenCopilotLogLines = new Set();
+// Configuration for event logging file location in user home directory
 const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
 const TOOL_WINDOW_MS = 3000;
+const COPILOT_LOG_WINDOW_MS = 8000;
 
 // Activates the extension when VS Code loads
 // Sets up the output channel for logging events and user notifications
 // Registers command handlers for inspecting extensions and viewing logs
 // Establishes watchers for command execution and document changes
 // Initializes timers to monitor Copilot activity periodically
+// Primary entry point that initializes all extension components and event listeners
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("Commit Confessional");
   outputChannel.appendLine("Commit Confessional detector started.");
@@ -96,19 +109,71 @@ function activate(context) {
       outputChannel.show(true);
     })
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("commitConfessional.debugStatus", async () => {
+      outputChannel.clear();
+      outputChannel.appendLine("===== COMMIT CONFESSIONAL DEBUG STATUS =====");
+      outputChannel.appendLine(`Timestamp: ${new Date().toISOString()}`);
+      outputChannel.appendLine(`Log file: ${vscodeLogPath}`);
+      outputChannel.appendLine(`Log exists: ${fs.existsSync(vscodeLogPath)}`);
+      
+      const appData = process.env.APPDATA;
+      const logsRoot = appData ? path.join(appData, "Code", "logs") : "APPDATA not set";
+      outputChannel.appendLine(`\nVS Code Logs Root: ${logsRoot}`);
+      outputChannel.appendLine(`Logs directory exists: ${fs.existsSync(logsRoot)}`);
+      
+      const latestLog = findLatestCopilotLog();
+      outputChannel.appendLine(`Copilot log found: ${latestLog ? latestLog.fullPath : "NO"}`);
+      
+      outputChannel.appendLine(`\nWatched Extensions Status:`);
+      getWatchedExtensions().forEach((id) => {
+        const ext = vscode.extensions.getExtension(id);
+        const status = ext ? (ext.isActive ? "🟢 ACTIVE" : "🟡 INSTALLED") : "🔴 NOT INSTALLED";
+        outputChannel.appendLine(`  ${id}: ${status}`);
+      });
+      
+      outputChannel.appendLine(`\nCommand API Status:`);
+      outputChannel.appendLine(`  onWillExecuteCommand available: ${typeof vscode.commands.onWillExecuteCommand === "function" ? "YES" : "NO"}`);
+      
+      outputChannel.appendLine(`\nLast Prompt Context: ${lastPromptContext ? JSON.stringify(lastPromptContext, null, 2) : "NONE"}`);
+      outputChannel.appendLine(`Current Tool: ${currentTool()}`);
+      outputChannel.appendLine(`Tool Window MS: ${TOOL_WINDOW_MS}`);
+      
+      outputChannel.appendLine(`\nBackend Configuration:`);
+      outputChannel.appendLine(`  Backend URL: ${getConfig("backendUrl") || "NOT SET"}`);
+      outputChannel.appendLine(`  AI Extensions Config: ${JSON.stringify(getConfig("aiExtensions"))}`);
+      outputChannel.appendLine(`  Paste Min Length: ${getConfig("pasteMinLength") || "default (12)"}`);
+      outputChannel.appendLine(`  Prompt Window MS: ${getConfig("promptWindowMs") || "default (60000)"}`);
+      
+      outputChannel.appendLine(`\nTesting clipboard access...`);
+      const clipboardText = await readClipboardSafe();
+      outputChannel.appendLine(`  Clipboard readable: ${clipboardText ? "YES" : "NO"}`);
+      outputChannel.appendLine(`  Clipboard length: ${clipboardText.length} chars`);
+      
+      outputChannel.appendLine(`\n===== END DEBUG STATUS =====`);
+      outputChannel.show(true);
+    })
+  );
   const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
   if (typeof onWillExecuteCommand === "function") {
+    outputChannel.appendLine("✓ Command execution monitoring enabled");
     context.subscriptions.push(
       onWillExecuteCommand((event) => {
         safeRun("onWillExecuteCommand", () => {
           const commandName = event && typeof event.command === "string" ? event.command : "";
           const toolName = COPILOT_COMMANDS[commandName];
+          
+          // Debug: Log all commands for diagnostics
+          if (commandName && commandName.startsWith("github.copilot")) {
+            outputChannel.appendLine(`[DEBUG] Raw Copilot command detected: ${commandName}`);
+          }
+          
           if (!toolName) {
             return;
           }
 
           markTool(toolName);
-          outputChannel.appendLine(`[${new Date().toISOString()}] copilot-command: ${commandName} -> ${toolName}`);
+          outputChannel.appendLine(`[${new Date().toISOString()}] ✓ copilot-command: ${commandName} -> ${toolName}`);
           appendJsonLine(vscodeLogPath, {
             ts: new Date().toISOString(),
             label: "copilot-command",
@@ -121,7 +186,7 @@ function activate(context) {
       })
     );
   } else {
-    outputChannel.appendLine("onWillExecuteCommand is not available in this VS Code host.");
+    outputChannel.appendLine("✗ onWillExecuteCommand is NOT available in this VS Code host.");
   }
 
   context.subscriptions.push(
@@ -154,6 +219,7 @@ function activate(context) {
   void pollCopilotLogs(true);
 }
 
+// Cleans up resources when the extension is deactivated or VS Code shuts down
 function deactivate() {
   if (activationTimer) {
     clearInterval(activationTimer);
@@ -163,6 +229,7 @@ function deactivate() {
   }
 }
 
+// Monitors text document changes to detect AI-generated content and paste operations
 async function handleDocumentChange(event) {
   if (!event?.contentChanges?.length) {
     return;
@@ -181,9 +248,15 @@ async function handleDocumentChange(event) {
   const now = Date.now();
   const documentPath = event.document?.uri?.fsPath || event.document?.uri?.toString() || "unknown";
   const promptPreview = buildPreview(insertedText);
+  // Identify prompt-like text by checking length and keywords suggesting user instructions
   const isPromptLike = insertedText.trim().length >= 20 && /[?]|review|explain|fix|generate|write|debug|refactor/i.test(insertedText);
   const looksTyped = insertedText.length === 1 && !insertedText.includes("\n");
   const isNonTrivialInsertion = insertedText.length > 20 || insertedText.includes("\n");
+  
+  // Debug logging for document changes
+  if (isNonTrivialInsertion) {
+    outputChannel.appendLine(`[DEBUG] Document change detected: ${insertedText.length} chars, file: ${path.basename(documentPath)}`);
+  }
 
   if (isPromptLike) {
     lastPromptContext = {
@@ -200,11 +273,22 @@ async function handleDocumentChange(event) {
     return;
   }
 
+  // Retrieve clipboard content to compare with inserted text for paste detection
   const clipboardText = await readClipboardSafe();
   const isPaste = detectPaste(insertedText, clipboardText);
   const activeTool = currentTool();
   const inferredSource = classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTrivialInsertion);
   const contentHash = hashContent(isPaste ? clipboardText : insertedText);
+
+  // Debug logging for insertion analysis
+  if (isNonTrivialInsertion) {
+    outputChannel.appendLine(`[DEBUG] Analysis: isPaste=${isPaste}, activeTool=${activeTool}, source=${inferredSource}`);
+    if (isPaste) {
+      outputChannel.appendLine(`[DEBUG] Paste detected - clipboard matches inserted text`);
+    } else if (activeTool !== "Human / Unknown") {
+      outputChannel.appendLine(`[DEBUG] Tool active: ${activeTool}`);
+    }
+  }
 
   if (inferredSource === "typed") {
     if (insertedText.length <= 8) {
@@ -239,15 +323,24 @@ async function handleDocumentChange(event) {
 async function pollAiExtensionActivation(initial = false) {
   const now = Date.now();
 
+  // Iterate through all tracked AI extensions and check their activation state
   for (const extensionId of getWatchedExtensions()) {
     const extension = vscode.extensions.getExtension(extensionId);
     const isActive = Boolean(extension?.isActive);
     const previousState = extensionStates.get(extensionId);
     extensionStates.set(extensionId, isActive);
 
+    // Debug: Log extension status on initial check
+    if (initial) {
+      const status = extension ? (isActive ? "active" : "installed-inactive") : "not-installed";
+      outputChannel.appendLine(`[DEBUG] Extension status: ${extensionId} = ${status}`);
+    }
+
     if (initial || !extension || !isActive || previousState === isActive) {
       continue;
     }
+    
+    outputChannel.appendLine(`[DEBUG] Extension activated: ${extensionId}`);
 
     const provider = detectProviderFromExtensionId(extensionId);
     const recentPrompt = getRecentPromptContext(now);
@@ -263,7 +356,7 @@ async function pollAiExtensionActivation(initial = false) {
       method: "ACTIVATE",
       documentPath: recentPrompt?.documentPath || getActiveDocumentPath(),
       promptPreview: recentPrompt?.preview || "none",
-      clipboardPreview: recentPrompt?.source === "paste" ? recentPrompt.preview : "none",
+      clipboardPreview: recentPrompt?.source === "paste-event" ? recentPrompt.preview : "none",
       endpoint: `vscode-extension://${extensionId}`,
       tabTitle: vscode.window.activeTextEditor?.document?.fileName || "",
       summary,
@@ -355,7 +448,8 @@ function buildPreview(value) {
 async function readClipboardSafe() {
   try {
     return await vscode.env.clipboard.readText();
-  } catch {
+  } catch (error) {
+    outputChannel.appendLine(`[DEBUG] Clipboard read failed: ${error?.message || String(error)}`);
     return "";
   }
 }
@@ -383,7 +477,9 @@ async function pollCopilotLogs(initial = false) {
   const latestLog = findLatestCopilotLog();
   if (!latestLog) {
     if (initial) {
-      outputChannel.appendLine("No Copilot log file found under %APPDATA%\\Code\\logs.");
+      const appData = process.env.APPDATA;
+      const logsRoot = appData ? path.join(appData, "Code", "logs") : "APPDATA not set";
+      outputChannel.appendLine(`✗ No Copilot log file found. Searched: ${logsRoot}`);
     }
     return;
   }
@@ -392,7 +488,7 @@ async function pollCopilotLogs(initial = false) {
     watchedCopilotLogPath = latestLog.fullPath;
     watchedCopilotLogSize = 0;
     seenCopilotLogLines.clear();
-    outputChannel.appendLine(`Watching Copilot log: ${watchedCopilotLogPath}`);
+    outputChannel.appendLine(`✓ Watching Copilot log: ${watchedCopilotLogPath} (${latestLog.size} bytes)`);
   }
 
   const chunk = readNewLogChunk(watchedCopilotLogPath, watchedCopilotLogSize);
@@ -419,7 +515,12 @@ async function pollCopilotLogs(initial = false) {
     }
 
     seenCopilotLogLines.add(dedupeKey);
-    outputChannel.appendLine(`[copilot-model] ${modelHint}`);
+    lastCopilotLogActivityAt = Date.now();
+    const inferredTool = inferToolFromCopilotLogLine(normalizedLine);
+    if (inferredTool) {
+      markTool(inferredTool);
+    }
+    outputChannel.appendLine(`✓ [copilot-model] ${modelHint}`);
     outputChannel.appendLine(normalizedLine);
     appendJsonLine(vscodeLogPath, {
       ts: new Date().toISOString(),
@@ -551,7 +652,37 @@ function classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTr
     return "inline-suggestion";
   }
 
+  if (isNonTrivialInsertion && hadRecentCopilotLogActivity(now)) {
+    return "inline-suggestion";
+  }
+
   return "typed";
+}
+
+function inferToolFromCopilotLogLine(line) {
+  const normalized = String(line || "").toLowerCase();
+
+  if (normalized.includes("[panel/editagent]")) {
+    return "Copilot Chat Edit";
+  }
+
+  if (normalized.includes("[copilotlanguagemodelwrapper]")) {
+    return "Copilot Inline Suggestion";
+  }
+
+  if (normalized.includes("[title]")) {
+    return "Copilot Chat";
+  }
+
+  if (normalized.includes("[progressmessages]")) {
+    return "Copilot Chat";
+  }
+
+  return null;
+}
+
+function hadRecentCopilotLogActivity(now = Date.now()) {
+  return Boolean(lastCopilotLogActivityAt) && now - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS;
 }
 
 function hashContent(value) {
@@ -589,6 +720,10 @@ function currentTool() {
     return pendingTool;
   }
 
+  if (hadRecentCopilotLogActivity()) {
+    return "Copilot (log activity)";
+  }
+
   return "Human / Unknown";
 }
 
@@ -601,23 +736,3 @@ module.exports = {
   activate,
   deactivate,
 };
-
-// this extension is very usefull 
-
-
-// Hello
-//dfjasldfjaslkdf
-//sdjflkasjflkasjflksj
-//sdkfjslkdfjlksjfkls
-//aksdjfalskjdflksjf
-
-
-//sdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-//asdffsadfsddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddsdf
-//sdffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
-
-//skdjflksajfdlkasjflkasjlkfdjasljflkasjdflkas
-//sdkjflsjflksjflkjslfkjslkjflksjflksjflksjflkjsklfjslkfjlksjflksjflksjfksjflksfk
-//sjdflksajfdlkjsalkfjkal;jjljklkjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
-//jsaldjflkasjdfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
-//sdjflkasjflkasjflksjfljsalkfjlsjflsjflksjflkjs
