@@ -5,6 +5,12 @@ This repository now hosts both hackathon projects in one place:
 - `HackbyteProject` remains the AI provenance tracker that captures model usage, proxy events, and commit evidence.
 - `living-codebase-narrator` is included as a companion system that turns code deltas into narrated documentation cards.
 
+## Full Documentation
+
+For a detailed architecture and codebase guide, see:
+
+- `docs/CODEBASE_GUIDE.md`
+
 ## Repo Layout
 
 - `backend/`: Commit Confessional / CodeTruth backend

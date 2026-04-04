@@ -11,7 +11,7 @@
 // But seriously, if Copilot writes a bug, does it count as code review?
 // Only if the code reviews itself and says "Ship it!" 🚀
 
-
+//
 //ajjjjjjjjjjjjjjjjjjjjjj
 //jsldfkjskljfklsjfklsfsj
 //sdjflksjfklsjjjjjjjjjj
@@ -24,14 +24,17 @@ const crypto = require("node:crypto");
 
 // Configuration and Constants
 const LOG_PATH = path.join(os.homedir(), ".cc-vscode-log.jsonl"); // Local event log file path
-const TOOL_WINDOW_MS = 3000; // Time window to identify recent tool usage
-const COPILOT_LOG_WINDOW_MS = 8000; // Time window for Copilot log activity detection
+const TOOL_WINDOW_MS = 12000; // Time window to identify recent tool usage
+const COPILOT_LOG_WINDOW_MS = 20000; // Time window for Copilot log activity detection
+const COPILOT_RECENT_ACTIVITY_WINDOW_MS = 30000; // Wider fallback window for delayed Copilot edit batches
 const DEFAULT_SESSION_ID = "local-dev"; // Default session identifier
-const AI_TAG_WINDOW_MS = 15 * 60 * 1000; // Keep recent AI insertions for tag propagation
+const AI_TAG_WINDOW_MS = 60 * 60 * 1000; // Keep recent AI insertions for tag propagation
 const AI_DETECTOR_FILE = ".aidetector.json"; // Persistent store for file AI lineage
 const AI_DETECTOR_VERSION = 1;
+const AI_FUZZY_MATCH_THRESHOLD = 0.6;
 const REPO_DISCOVERY_MAX_DEPTH = 2;
 const UNTRACKED_PREVIEW_MAX_BYTES = 256 * 1024;
+const RECENT_AI_LOG_SCAN_LINES = 2500;
 // Map of VS Code command IDs to user-friendly tool names
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
@@ -40,11 +43,16 @@ const COPILOT_COMMANDS = {
   "github.copilot.chat.inlineChat.start": "Inline Chat",
   "github.copilot.chat.inlineChat.accept": "Inline Chat (Accepted)",
   "github.copilot.edits.apply": "Copilot Edits",
+  "github.copilot.edits.accept": "Copilot Edits (Accepted)",
   "github.copilot.chat.applyInEditor": "Chat -> Apply in Editor",
+  "github.copilot.chat.acceptChanges": "Chat Accept Changes",
   "github.copilot.chat.insertAtCursor": "Chat -> Insert at Cursor",
   "github.copilot.fixes.apply": "Copilot Fix",
   "github.copilot.generateTests.apply": "Copilot Generate Tests",
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
+  "vscode.editorChat.accept": "Editor Chat (Accepted)",
+  "vscode.editorChat.acceptChanges": "Editor Chat Accept Changes",
+  "workbench.action.chat.applyInEditor": "Chat -> Apply in Editor",
 };
 
 // Output and State Management
@@ -583,6 +591,7 @@ async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
   }
 
   const diffText = await runGit(["show", "--format=", "--unified=0", commitHash], repoRoot);
+  const filePaths = extractChangedFilePathsFromDiff(diffText);
   const latestCommit = await runGit(["show", "-s", "--format=%s", commitHash], repoRoot);
   const addedLineSamples = extractAddedLineSamples(diffText, 2);
   const receiptBaseUrl = trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
@@ -594,6 +603,7 @@ async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
       diffText,
       receiptUrl: `commit://${commitHash}`,
       commitMessage: latestCommit.trim(),
+      filePaths,
     }),
   });
 
@@ -643,6 +653,7 @@ async function previewReceiptForRepo(repoRoot) {
     throw new Error("No staged or working-tree diff found.");
   }
 
+  const filePaths = extractChangedFilePathsFromDiff(diffText);
   const addedLineSamples = extractAddedLineSamples(diffText, 2);
   const receiptBaseUrl = trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
   const response = await fetch(`${receiptBaseUrl}/api/receipt`, {
@@ -651,6 +662,7 @@ async function previewReceiptForRepo(repoRoot) {
     body: JSON.stringify({
       diffText,
       receiptUrl: "preview://working-tree",
+      filePaths,
     }),
   });
 
@@ -725,7 +737,7 @@ async function pollCopilotLogs(initial = false) {
   // Detect when log file is rotated, reset tracking
   if (watchedCopilotLogPath !== latestLog.fullPath) {
     watchedCopilotLogPath = latestLog.fullPath; // Switch to new log file
-    watchedCopilotLogSize = 0; // Start from beginning
+    watchedCopilotLogSize = latestLog.size; // Tail only new entries to avoid replaying stale completions
     seenCopilotLogLines.clear(); // Clear dedup cache
   }
   // Read only new lines appended since last read
@@ -735,18 +747,51 @@ async function pollCopilotLogs(initial = false) {
   for (const line of chunk.lines) {
     const normalizedLine = String(line || "").trim();
     const model = extractModelHint(normalizedLine);
+    const tool = inferToolFromCopilotLogLine(normalizedLine);
+    const codeContent = extractCodeFromCopilotLogLine(normalizedLine);
+    const hasRelevantSignal = Boolean(model || tool || codeContent);
     const dedupeKey = `${watchedCopilotLogPath}|${normalizedLine}`;
-    if (!model || seenCopilotLogLines.has(dedupeKey)) continue;
+    if (!hasRelevantSignal || seenCopilotLogLines.has(dedupeKey)) continue;
     seenCopilotLogLines.add(dedupeKey);
     lastCopilotLogActivityAt = Date.now();
-    lastDetectedModel = model;
-    const tool = inferToolFromCopilotLogLine(normalizedLine);
+    if (model) {
+      lastDetectedModel = model;
+    }
     if (tool) {
       pendingTool = tool;
       pendingToolTime = Date.now();
     }
-    appendJsonLine({ label: "model-query", source: "copilot-log", provider: "copilot", model, rawLine: normalizedLine });
-    log(`copilot-log: model=${model} tool=${tool || currentTool()} line=${buildPreview(normalizedLine)}`);
+    if (codeContent) {
+      const activeDocPath = getActiveDocumentPath();
+      recordPendingAiInsertion(activeDocPath, codeContent, {
+        provider: "copilot",
+        model: model || lastDetectedModel,
+        tool: tool || currentTool(),
+        source: "copilot-log-completion",
+        createdAt: Date.now(),
+      });
+      appendJsonLine({
+        label: "copilot-log-completion",
+        source: "copilot-log-completion",
+        provider: "copilot",
+        model: model || lastDetectedModel || null,
+        tool: tool || currentTool(),
+        documentPath: activeDocPath,
+        contentHash: hashContent(codeContent),
+        lineCount: codeContent.split(/\r?\n/).length,
+        contentText: codeContent,
+      });
+      log(`copilot-log: extracted completion (${codeContent.length} chars) model=${model || lastDetectedModel || "unknown"}`);
+    }
+    appendJsonLine({
+      label: model ? "model-query" : "copilot-log-signal",
+      source: "copilot-log",
+      provider: "copilot",
+      model: model || lastDetectedModel || null,
+      tool: tool || currentTool(),
+      rawLine: normalizedLine,
+    });
+    log(`copilot-log: model=${model || lastDetectedModel || "unknown"} tool=${tool || currentTool()} line=${buildPreview(normalizedLine)}`);
   }
 }
 
@@ -783,7 +828,13 @@ function currentTool() {
 function classifyInsertionSource(now, isPaste, insertedText) {
   if (isPaste) return "paste-event"; // Explicit paste from clipboard
   // Multi-line or long text during AI activity suggests suggestion
-  if ((currentTool() !== "Human / Unknown" || now - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) && insertedText.length > 20) {
+  const hasActiveTool = currentTool() !== "Human / Unknown";
+  const hasRecentCopilotActivity = now - lastCopilotLogActivityAt < COPILOT_RECENT_ACTIVITY_WINDOW_MS;
+  const isMultiLine = insertedText.includes("\n");
+  if ((hasActiveTool || hasRecentCopilotActivity) && insertedText.length > 10) {
+    return "inline-suggestion";
+  }
+  if (hasRecentCopilotActivity && isMultiLine) {
     return "inline-suggestion";
   }
   return "typed"; // Single character typing
@@ -948,15 +999,16 @@ function updateAiDetectorStateForDocument(doc, previousText, nextText) {
   const detector = loadAiDetectorState(detectorPath);
   const filePath = normalizeTrackedPath(path.relative(repoRoot, doc.uri.fsPath));
   const fileState = detector.files[filePath] || createEmptyFileState(doc.languageId);
+  const recentInsertions = getRecentAiInsertions(doc.uri.fsPath);
   const nextLineTags = buildNextLineTags({
     previousLineTags: fileState.lineTags,
     nextText,
-    recentInsertions: getRecentAiInsertions(doc.uri.fsPath),
+    recentInsertions,
   });
   const aiTaggedLines = nextLineTags.filter((entry) => entry.ai).length;
   const totalMeaningfulLines = nextLineTags.length;
   const aiShare = totalMeaningfulLines > 0 ? Math.round((aiTaggedLines / totalMeaningfulLines) * 100) : 0;
-  const touchedByAi = aiTaggedLines > 0 || getRecentAiInsertions(doc.uri.fsPath).length > 0;
+  const touchedByAi = aiTaggedLines > 0 || recentInsertions.length > 0;
 
   detector.files[filePath] = {
     languageId: doc.languageId,
@@ -981,26 +1033,23 @@ function updateAiDetectorStateForDocument(doc, previousText, nextText) {
 function buildNextLineTags({ previousLineTags, nextText, recentInsertions }) {
   const now = new Date().toISOString();
   const previousQueue = buildTagQueue(Array.isArray(previousLineTags) ? previousLineTags : []);
+  const previousSignatureQueue = buildMetadataQueue(previousLineTags, "signature", { aiOnly: true });
+  const previousSimilarityCandidates = buildSimilarityCandidates(previousLineTags, { aiOnly: true });
   const insertionQueue = buildInsertionQueue(recentInsertions);
-  const nextLines = extractMeaningfulContentLines(nextText);
+  const insertionLineRecords = (Array.isArray(recentInsertions) ? recentInsertions : []).flatMap((entry) =>
+    entry.lineRecords || (entry.lines || []).map((line) => buildLineRecord(line))
+  );
+  const insertionSignatureQueue = buildMetadataQueue(
+    insertionLineRecords,
+    "signature"
+  );
+  const insertionSimilarityCandidates = buildSimilarityCandidates(insertionLineRecords);
+  const nextLines = extractMeaningfulLineRecords(nextText);
 
-  return nextLines.map((line) => {
-    const hash = hashContent(line);
-    const preview = buildPreview(line);
-    const carriedTag = shiftQueuedEntry(previousQueue, hash);
-    if (carriedTag) {
-      return {
-        ...carriedTag,
-        preview,
-        lastSeenAt: now,
-      };
-    }
-
-    const insertionTag = shiftQueuedEntry(insertionQueue, hash);
+  return nextLines.map((lineRecord) => {
+    const insertionTag = shiftQueuedEntry(insertionQueue, lineRecord.hash);
     if (insertionTag) {
-      return {
-        hash,
-        preview,
+      return buildStoredLineTag(lineRecord, {
         ai: true,
         provider: insertionTag.provider || null,
         model: insertionTag.model || null,
@@ -1008,12 +1057,84 @@ function buildNextLineTags({ previousLineTags, nextText, recentInsertions }) {
         source: insertionTag.source || "inline-suggestion",
         firstSeenAt: insertionTag.createdAt || now,
         lastSeenAt: now,
-      };
+        matchType: "recent-ai-exact",
+      });
     }
 
-    return {
-      hash,
-      preview,
+    const carriedTag = shiftQueuedEntry(previousQueue, lineRecord.hash);
+    if (carriedTag) {
+      return buildStoredLineTag(lineRecord, {
+        ...carriedTag,
+        lastSeenAt: now,
+        matchType: "exact",
+      });
+    }
+
+    const structuralInsertionTag = consumeBestQueuedMatch(
+      insertionSignatureQueue,
+      lineRecord.signature,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (structuralInsertionTag) {
+      return buildStoredLineTag(lineRecord, {
+        ai: true,
+        provider: structuralInsertionTag.provider || null,
+        model: structuralInsertionTag.model || null,
+        tool: structuralInsertionTag.tool || null,
+        source: structuralInsertionTag.source || "inline-suggestion",
+        firstSeenAt: structuralInsertionTag.createdAt || now,
+        lastSeenAt: now,
+        matchType: "recent-ai-signature",
+      });
+    }
+
+    const structurallyCarriedTag = consumeBestQueuedMatch(
+      previousSignatureQueue,
+      lineRecord.signature,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (structurallyCarriedTag) {
+      return buildStoredLineTag(lineRecord, {
+        ...structurallyCarriedTag,
+        lastSeenAt: now,
+        matchType: "lineage-signature",
+      });
+    }
+
+    const similarInsertionTag = consumeBestSimilarCandidate(
+      insertionSimilarityCandidates,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (similarInsertionTag) {
+      return buildStoredLineTag(lineRecord, {
+        ai: true,
+        provider: similarInsertionTag.provider || null,
+        model: similarInsertionTag.model || null,
+        tool: similarInsertionTag.tool || null,
+        source: similarInsertionTag.source || "inline-suggestion",
+        firstSeenAt: similarInsertionTag.createdAt || now,
+        lastSeenAt: now,
+        matchType: "recent-ai-similar",
+      });
+    }
+
+    const similarCarriedTag = consumeBestSimilarCandidate(
+      previousSimilarityCandidates,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (similarCarriedTag) {
+      return buildStoredLineTag(lineRecord, {
+        ...similarCarriedTag,
+        lastSeenAt: now,
+        matchType: "lineage-similar",
+      });
+    }
+
+    return buildStoredLineTag(lineRecord, {
       ai: false,
       provider: null,
       model: null,
@@ -1021,7 +1142,8 @@ function buildNextLineTags({ previousLineTags, nextText, recentInsertions }) {
       source: "human",
       firstSeenAt: now,
       lastSeenAt: now,
-    };
+      matchType: "human",
+    });
   });
 }
 
@@ -1038,11 +1160,58 @@ function buildTagQueue(lineTags) {
   return queue;
 }
 
+function buildMetadataQueue(entries, keyName, options = {}) {
+  const queue = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const normalizedEntry = normalizeSimilarityCandidate(entry);
+    if (options.aiOnly && !normalizedEntry?.ai) {
+      continue;
+    }
+    const key = String(normalizedEntry?.[keyName] || "");
+    if (!key) {
+      continue;
+    }
+    if (!queue.has(key)) {
+      queue.set(key, []);
+    }
+    queue.get(key).push(normalizedEntry);
+  }
+  return queue;
+}
+
+function consumeBestQueuedMatch(queue, key, lineRecord, minScore) {
+  const items = queue.get(String(key || ""));
+  if (!items || items.length === 0) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestScore = minScore;
+  for (let index = 0; index < items.length; index += 1) {
+    const score = calculateLineSimilarity(lineRecord, items[index]);
+    if (score >= bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return null;
+  }
+
+  const [entry] = items.splice(bestIndex, 1);
+  if (items.length === 0) {
+    queue.delete(String(key || ""));
+  }
+  return entry;
+}
+
 function buildInsertionQueue(insertions) {
   const queue = new Map();
   for (const insertion of insertions) {
-    for (const line of insertion.lines || []) {
-      const hash = hashContent(line);
+    const lineRecords = insertion.lineRecords || (insertion.lines || []).map((line) => buildLineRecord(line));
+    for (const lineRecord of lineRecords) {
+      const hash = String(lineRecord?.hash || "");
       if (!hash) continue;
       if (!queue.has(hash)) {
         queue.set(hash, []);
@@ -1053,6 +1222,9 @@ function buildInsertionQueue(insertions) {
         tool: insertion.tool,
         source: insertion.source,
         createdAt: insertion.createdAt,
+        normalized: lineRecord.normalized,
+        signature: lineRecord.signature,
+        fingerprint: lineRecord.fingerprint,
       });
     }
   }
@@ -1072,13 +1244,13 @@ function shiftQueuedEntry(queue, hash) {
 }
 
 function recordPendingAiInsertion(documentPath, contentText, meta) {
-  const normalizedPath = String(documentPath || "");
+  const normalizedPath = normalizePendingInsertionKey(documentPath);
   if (!normalizedPath) {
     return;
   }
 
-  const lines = extractMeaningfulContentLines(contentText);
-  if (lines.length === 0) {
+  const lineRecords = extractMeaningfulLineRecords(contentText);
+  if (lineRecords.length === 0) {
     return;
   }
 
@@ -1088,21 +1260,96 @@ function recordPendingAiInsertion(documentPath, contentText, meta) {
     model: meta.model || null,
     tool: meta.tool || null,
     source: meta.source || "inline-suggestion",
-    lines,
+    lineRecords,
   }];
   pendingAiInsertions.set(normalizedPath, nextEntries);
 }
 
 function getRecentAiInsertions(documentPath) {
-  const normalizedPath = String(documentPath || "");
+  const normalizedPath = normalizePendingInsertionKey(documentPath);
+  if (!normalizedPath) {
+    return [];
+  }
   const now = Date.now();
-  const entries = (pendingAiInsertions.get(normalizedPath) || []).filter((entry) => now - Number(entry.createdAt || 0) <= AI_TAG_WINDOW_MS);
-  if (entries.length > 0) {
-    pendingAiInsertions.set(normalizedPath, entries);
+  const memoryEntries = (pendingAiInsertions.get(normalizedPath) || []).filter(
+    (entry) => now - Number(entry.createdAt || 0) <= AI_TAG_WINDOW_MS
+  );
+  if (memoryEntries.length > 0) {
+    pendingAiInsertions.set(normalizedPath, memoryEntries);
   } else {
     pendingAiInsertions.delete(normalizedPath);
   }
-  return entries;
+  const logEntries = readRecentAiInsertionsFromEventLog(normalizedPath, now);
+  return [...memoryEntries, ...logEntries];
+}
+
+function normalizePendingInsertionKey(documentPath) {
+  const rawPath = String(documentPath || "").trim();
+  if (!rawPath) {
+    return "";
+  }
+  const normalized = path.normalize(rawPath).replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function readRecentAiInsertionsFromEventLog(normalizedDocumentPath, now = Date.now()) {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(LOG_PATH, "utf8");
+  } catch {
+    return [];
+  }
+
+  return raw
+    .split(/\r?\n/)
+    .slice(-RECENT_AI_LOG_SCAN_LINES)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .map((entry) => buildRecentInsertionFromLogEntry(entry, normalizedDocumentPath, now))
+    .filter(Boolean);
+}
+
+function buildRecentInsertionFromLogEntry(entry, normalizedDocumentPath, now) {
+  const source = String(entry?.source || entry?.label || "");
+  const provider = String(entry?.provider || "").toLowerCase();
+  const createdAt = Date.parse(entry?.ts || entry?.timeStamp || 0);
+  if (Number.isNaN(createdAt) || now - createdAt > AI_TAG_WINDOW_MS) {
+    return null;
+  }
+
+  if (!(source === "inline-suggestion" || source === "copilot-log-completion" || entry?.label === "copilot-log-completion")) {
+    return null;
+  }
+
+  if (!provider || provider === "editor" || provider === "unknown") {
+    return null;
+  }
+
+  const entryPath = normalizePendingInsertionKey(entry?.documentPath);
+  if (!entryPath || entryPath !== normalizedDocumentPath) {
+    return null;
+  }
+
+  const contentText = String(entry?.contentText || "");
+  const lineRecords = extractMeaningfulLineRecords(contentText);
+  if (lineRecords.length === 0) {
+    return null;
+  }
+
+  return {
+    createdAt,
+    provider,
+    model: entry?.model || null,
+    tool: entry?.tool || null,
+    source: source || "inline-suggestion",
+    lineRecords,
+  };
 }
 
 function loadAiDetectorState(detectorPath) {
@@ -1123,7 +1370,7 @@ function normalizeAiDetectorState(value) {
   return {
     version: AI_DETECTOR_VERSION,
     updatedAt: parsed.updatedAt || null,
-    files: parsed.files && typeof parsed.files === "object" ? parsed.files : {},
+    files: normalizeStoredAiFiles(parsed.files),
     commits: Array.isArray(parsed.commits) ? parsed.commits : [],
   };
 }
@@ -1138,6 +1385,197 @@ function createEmptyFileState(languageId) {
     dominantOrigin: "human",
     lineTags: [],
   };
+}
+
+function normalizeStoredAiFiles(files) {
+  const normalizedFiles = {};
+  for (const [filePath, fileState] of Object.entries(files && typeof files === "object" ? files : {})) {
+    normalizedFiles[filePath] = {
+      ...createEmptyFileState(fileState?.languageId || "unknown"),
+      ...(fileState && typeof fileState === "object" ? fileState : {}),
+      lineTags: Array.isArray(fileState?.lineTags) ? fileState.lineTags.map(normalizeStoredLineTag) : [],
+    };
+  }
+  return normalizedFiles;
+}
+
+function normalizeStoredLineTag(tag) {
+  const lineRecord = buildLineRecord(tag?.normalized || tag?.preview || "");
+  return {
+    hash: tag?.hash || lineRecord.hash,
+    preview: tag?.preview || lineRecord.preview,
+    normalized: tag?.normalized || lineRecord.normalized,
+    signature: tag?.signature || lineRecord.signature,
+    fingerprint: tag?.fingerprint || lineRecord.fingerprint,
+    ai: Boolean(tag?.ai),
+    provider: tag?.provider || null,
+    model: tag?.model || null,
+    tool: tag?.tool || null,
+    source: tag?.source || (tag?.ai ? "inline-suggestion" : "human"),
+    firstSeenAt: tag?.firstSeenAt || null,
+    lastSeenAt: tag?.lastSeenAt || null,
+    matchType: tag?.matchType || (tag?.ai ? "exact" : "human"),
+  };
+}
+
+function buildStoredLineTag(lineRecord, meta) {
+  return {
+    hash: lineRecord.hash,
+    preview: lineRecord.preview,
+    normalized: lineRecord.normalized,
+    signature: lineRecord.signature,
+    fingerprint: lineRecord.fingerprint,
+    ai: Boolean(meta?.ai),
+    provider: meta?.provider || null,
+    model: meta?.model || null,
+    tool: meta?.tool || null,
+    source: meta?.source || (meta?.ai ? "inline-suggestion" : "human"),
+    firstSeenAt: meta?.firstSeenAt || null,
+    lastSeenAt: meta?.lastSeenAt || null,
+    matchType: meta?.matchType || (meta?.ai ? "exact" : "human"),
+  };
+}
+
+function buildSimilarityCandidates(entries, options = {}) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => !options.aiOnly || entry?.ai)
+    .map((entry) => normalizeSimilarityCandidate(entry))
+    .filter((entry) => entry.hash || entry.signature || entry.normalized);
+}
+
+function normalizeSimilarityCandidate(entry) {
+  const lineRecord = buildLineRecord(entry?.normalized || entry?.preview || "");
+  return {
+    ...entry,
+    hash: entry?.hash || lineRecord.hash,
+    normalized: entry?.normalized || lineRecord.normalized,
+    signature: entry?.signature || lineRecord.signature,
+    fingerprint: entry?.fingerprint || lineRecord.fingerprint,
+  };
+}
+
+function consumeBestSimilarCandidate(candidates, lineRecord, minScore) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestScore = minScore;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const score = calculateLineSimilarity(lineRecord, candidates[index]);
+    if (score >= bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return null;
+  }
+
+  return candidates.splice(bestIndex, 1)[0];
+}
+
+function calculateLineSimilarity(left, right) {
+  const leftRecord = normalizeSimilarityCandidate(left);
+  const rightRecord = normalizeSimilarityCandidate(right);
+  if (leftRecord.hash && rightRecord.hash && leftRecord.hash === rightRecord.hash) {
+    return 1;
+  }
+
+  const exactSignatureMatch =
+    leftRecord.signature &&
+    rightRecord.signature &&
+    leftRecord.signature === rightRecord.signature;
+  const exactFingerprintMatch =
+    leftRecord.fingerprint &&
+    rightRecord.fingerprint &&
+    leftRecord.fingerprint === rightRecord.fingerprint;
+  const tokenScore = calculateTokenOverlap(leftRecord.fingerprint, rightRecord.fingerprint);
+  const charScore = calculateCharacterOverlap(leftRecord.normalized, rightRecord.normalized);
+  const weightedScore = (tokenScore * 0.7) + (charScore * 0.3);
+
+  if (exactSignatureMatch && (tokenScore >= 0.5 || charScore >= 0.55)) {
+    return Math.max(weightedScore, 0.92);
+  }
+
+  if (exactFingerprintMatch && charScore >= 0.45) {
+    return Math.max(weightedScore, 0.84);
+  }
+
+  return weightedScore;
+}
+
+function calculateTokenOverlap(leftFingerprint, rightFingerprint) {
+  const left = new Set(String(leftFingerprint || "").split("|").filter(Boolean));
+  const right = new Set(String(rightFingerprint || "").split("|").filter(Boolean));
+  if (left.size === 0 || right.size === 0) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) {
+      overlap += 1;
+    }
+  }
+  return overlap / Math.max(left.size, right.size);
+}
+
+function calculateCharacterOverlap(leftValue, rightValue) {
+  const left = String(leftValue || "");
+  const right = String(rightValue || "");
+  if (!left || !right) {
+    return 0;
+  }
+  if (left === right) {
+    return 1;
+  }
+
+  const shortestLength = Math.min(left.length, right.length);
+  let samePrefix = 0;
+  while (samePrefix < shortestLength && left[samePrefix] === right[samePrefix]) {
+    samePrefix += 1;
+  }
+
+  let sameSuffix = 0;
+  while (
+    sameSuffix < shortestLength &&
+    left[left.length - 1 - sameSuffix] === right[right.length - 1 - sameSuffix]
+  ) {
+    sameSuffix += 1;
+  }
+
+  return (samePrefix + sameSuffix) / (left.length + right.length);
+}
+
+function buildLineRecord(value) {
+  const normalized = normalizeWhitespace(value);
+  return {
+    normalized,
+    hash: hashContent(normalized),
+    signature: createStructuralSignature(normalized),
+    fingerprint: createTokenFingerprint(normalized),
+    preview: buildPreview(normalized),
+  };
+}
+
+function createStructuralSignature(value) {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/\b0x[a-f0-9]+\b/gi, "<num>")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "<num>")
+    .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "<str>");
+}
+
+function createTokenFingerprint(value) {
+  return [...new Set(
+    createStructuralSignature(value).match(/[a-z_][a-z0-9_$]*/gi) || []
+  )]
+    .map((token) => token.toLowerCase())
+    .sort()
+    .slice(0, 24)
+    .join("|");
 }
 
 function getWorkspaceRootForUri(uri) {
@@ -1346,22 +1784,24 @@ function hashContent(value) {
   return normalized ? `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}` : null;
 }
 
-function extractMeaningfulContentLines(value) {
+function extractMeaningfulLineRecords(value) {
   return String(value || "")
     .split(/\r?\n/)
     .map(normalizeWhitespace)
-    .filter(isMeaningfulContentLine);
+    .filter(isMeaningfulContentLine)
+    .map((line) => buildLineRecord(line));
+}
+
+function extractMeaningfulContentLines(value) {
+  return extractMeaningfulLineRecords(value).map((entry) => entry.normalized);
 }
 
 function isMeaningfulContentLine(line) {
   const value = normalizeWhitespace(line);
-  if (value.length < 15) {
+  if (value.length < 8) {
     return false;
   }
   if (/^[{}()[\];,]+$/.test(value)) {
-    return false;
-  }
-  if (/^(import|export|from|return|const|let|var|module\.exports)\b\s*[^=;]*;?$/i.test(value) && value.length < 30) {
     return false;
   }
   return true;
@@ -1402,6 +1842,75 @@ function runGit(args, cwd) {
       resolve(stdout);
     });
   });
+}
+
+// Extract code completion content from Copilot log lines
+// Copilot logs may contain completions in various JSON-ish formats
+function extractCodeFromCopilotLogLine(line) {
+  const normalizedLine = String(line || "");
+
+  // Pattern 1: "solution":["<code>"] or "solutions":["<code>"]
+  const solutionMatch = normalizedLine.match(/"solutions?":\s*\["([^"]+)"\]/);
+  if (solutionMatch && solutionMatch[1] && solutionMatch[1].length > 8) {
+    return unescapeLogString(solutionMatch[1]);
+  }
+
+  // Pattern 2: "completion":"<code>" or "completionText":"<code>"
+  const completionMatch = normalizedLine.match(/"completion(?:Text)?":\s*"([^"]{10,})"/);
+  if (completionMatch && completionMatch[1]) {
+    return unescapeLogString(completionMatch[1]);
+  }
+
+  // Pattern 3: "displayText":"<code>"
+  const displayMatch = normalizedLine.match(/"displayText":\s*"([^"]{10,})"/);
+  if (displayMatch && displayMatch[1]) {
+    return unescapeLogString(displayMatch[1]);
+  }
+
+  // Pattern 4: "insertText":"<code>"
+  const insertMatch = normalizedLine.match(/"insertText":\s*"([^"]{10,})"/);
+  if (insertMatch && insertMatch[1]) {
+    return unescapeLogString(insertMatch[1]);
+  }
+
+  // Pattern 5: "text":"<code>" in contexts that look like completions
+  if (/complet|suggest|inline|ghost/i.test(normalizedLine)) {
+    const textMatch = normalizedLine.match(/"text":\s*"([^"]{10,})"/);
+    if (textMatch && textMatch[1]) {
+      return unescapeLogString(textMatch[1]);
+    }
+  }
+
+  return null;
+}
+
+// Unescape JSON-encoded strings from log output
+function unescapeLogString(value) {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return String(value || "")
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"');
+  }
+}
+
+// Extract changed file paths from unified diff text
+function extractChangedFilePathsFromDiff(diffText) {
+  const files = new Set();
+  for (const rawLine of String(diffText || "").split(/\r?\n/)) {
+    if (rawLine.startsWith("+++ ")) {
+      const pathValue = rawLine.slice(4).trim();
+      if (pathValue && pathValue !== "/dev/null") {
+        const normalized = pathValue.replace(/^b\//, "").replace(/\\/g, "/");
+        if (normalized) {
+          files.add(normalized);
+        }
+      }
+    }
+  }
+  return [...files];
 }
 
 module.exports = { activate, deactivate };
