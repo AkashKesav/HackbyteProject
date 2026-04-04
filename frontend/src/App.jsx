@@ -240,17 +240,28 @@ export default function App() {
                 <div className="overflow-hidden rounded-xl border border-[#252c3e]">
                   <div className="grid grid-cols-[minmax(0,1.6fr)_100px_110px_90px] gap-3 border-b border-[#252c3e] bg-[#181d28] px-4 py-3 font-mono text-[10px] uppercase tracking-[0.18em] text-[#4a5578]">
                     <div>Commit</div>
-                    <div>AI</div>
-                    <div>Copilot</div>
+                    <div>AI %</div>
+                    <div>Copilot %</div>
                     <div>Certainty</div>
                   </div>
-                  {recentCommits.map((commit) => (
+                  {recentCommits.map((commit, idx) => {
+                    const isLatestCommit = idx === 0;
+                    const aiPercentage = commit.ai?.estimatedAiPercentage ?? 0;
+                    const hasAiData = commit.ai !== undefined && commit.ai !== null;
+                    return (
                     <div
                       key={commit.hash || commit.shortHash}
-                      className="grid grid-cols-1 gap-3 border-b border-[#252c3e] bg-[#11141c] px-4 py-4 last:border-b-0 md:grid-cols-[minmax(0,1.6fr)_100px_110px_90px]"
+                      className={`grid grid-cols-1 gap-3 border-b border-[#252c3e] px-4 py-4 last:border-b-0 md:grid-cols-[minmax(0,1.6fr)_100px_110px_90px] ${isLatestCommit && hasAiData ? 'bg-[#1a1f2e] ring-1 ring-inset ring-[#3d5a80]' : 'bg-[#11141c]'}`}
                     >
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-[#edf0fa]">{commit.subject}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="truncate text-sm font-medium text-[#edf0fa]">{commit.subject}</div>
+                          {isLatestCommit && hasAiData && (
+                            <span className="inline-block shrink-0 rounded-full bg-[#1fc86b] px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-widest text-[#0b0d12]">
+                              NEW
+                            </span>
+                          )}
+                        </div>
                         <div className="mt-1 text-xs text-[#8492b4]">
                           {(commit.authorName || "Unknown author")} | {formatDateTime(commit.authoredAt)} |{" "}
                           {commit.shortHash || "unknown"}
@@ -267,7 +278,8 @@ export default function App() {
                       <CellValue value={commit.copilot ? `${commit.copilot.estimatedAiPercentage}%` : "--"} tone="text-[#f5a623]" />
                       <CellValue value={commit.ai?.certainty || "--"} tone={certaintyTone(commit.ai?.certainty)} />
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </Panel>
