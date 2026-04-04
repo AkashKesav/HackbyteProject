@@ -1,3 +1,7 @@
+// === VS Code Extension: Hackbyte Code Narrator ===
+// Tracks Copilot usage, AI tool interactions, and generates live code documentation.
+// Features: code diff tracking, AI event logging, inline documentation, receipt generation.
+
 const vscode = require("vscode");
 const { execFile } = require("node:child_process");
 const fs = require("node:fs");
@@ -5,10 +9,12 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
-const LOG_PATH = path.join(os.homedir(), ".cc-vscode-log.jsonl");
-const TOOL_WINDOW_MS = 3000;
-const COPILOT_LOG_WINDOW_MS = 8000;
-const DEFAULT_SESSION_ID = "local-dev";
+// Configuration and Constants
+const LOG_PATH = path.join(os.homedir(), ".cc-vscode-log.jsonl"); // Local event log file path
+const TOOL_WINDOW_MS = 3000; // Time window to identify recent tool usage
+const COPILOT_LOG_WINDOW_MS = 8000; // Time window for Copilot log activity detection
+const DEFAULT_SESSION_ID = "local-dev"; // Default session identifier
+// Map of VS Code command IDs to user-friendly tool names
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
   "editor.action.inlineSuggest.acceptNextLine": "Inline Suggestion (Next Line)",
@@ -23,37 +29,43 @@ const COPILOT_COMMANDS = {
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
 };
 
-let outputChannel;
-let activationTimer;
-let copilotLogTimer;
-let pendingTool = null;
-let pendingToolTime = 0;
-let lastCopilotLogActivityAt = 0;
-let lastPromptContext = null;
-let watchedCopilotLogPath = null;
-let watchedCopilotLogSize = 0;
-let commitPollTimer;
+// Output and State Management
+let outputChannel; // VS Code output channel for logging
+let activationTimer; // Timer for polling AI extension activation
+let copilotLogTimer; // Timer for polling Copilot logs
+let pendingTool = null; // Most recently detected AI tool
+let pendingToolTime = 0; // Timestamp of last tool detection
+let lastCopilotLogActivityAt = 0; // Timestamp of last Copilot log activity
+let lastPromptContext = null; // Recent user input context (paste/suggestion)
+let watchedCopilotLogPath = null; // Path to currently monitored Copilot log file
+let watchedCopilotLogSize = 0; // Current read position in Copilot log
+let commitPollTimer; // Timer for polling repository commits
 
-const extensionStates = new Map();
-const seenCopilotLogLines = new Set();
-const narratorSnapshots = new Map();
-const narratorPending = new Map();
-const repoHeads = new Map();
+// Data structures for tracking state
+const extensionStates = new Map(); // Track AI extension activation state
+const seenCopilotLogLines = new Set(); // Prevent duplicate log line processing
+const narratorSnapshots = new Map(); // Store previous file content for diff generation
+const narratorPending = new Map(); // Queue pending narrator delta documents
+const repoHeads = new Map(); // Track git HEAD for each repository
 
+// === Sidebar UI Provider ===
+// Manages the webview sidebar that displays live code documentation and narrator snapshots
 class SidebarProvider {
-  static viewType = "lcn.sidebar";
+  static viewType = "lcn.sidebar"; // Unique identifier for this webview
 
   constructor(context) {
-    this.context = context;
-    this.view = undefined;
-    this.lastDocsJson = "[]";
-    this.pollTimer = undefined;
+    this.context = context; // Extension context for subscriptions
+    this.view = undefined; // Webview instance reference
+    this.lastDocsJson = "[]"; // Cache to detect documentation changes
+    this.pollTimer = undefined; // Timer for polling backend docs
   }
 
+  // Initialize webview when sidebar panel is created
   resolveWebviewView(view) {
     this.view = view;
-    view.webview.options = { enableScripts: true };
-    view.webview.html = this.renderHtml(view.webview);
+    view.webview.options = { enableScripts: true }; // Enable JavaScript in webview
+    view.webview.html = this.renderHtml(view.webview); // Render UI with CSP headers
+    // Handle messages from webview (file opens, votes)
     view.webview.onDidReceiveMessage(async (msg) => {
       if (msg?.type === "openFile" && typeof msg.filePath === "string") {
         try {
@@ -216,18 +228,23 @@ class SidebarProvider {
   }
 }
 
+// === Extension Activation ===
+// Entry point when extension is loaded by VS Code
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("Hackbyte Code Narrator");
   const sidebar = new SidebarProvider(context);
   context.subscriptions.push(outputChannel);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar));
 
+  // Register all commands and event listeners
   registerCommands(context);
   registerListeners(context, sidebar);
 
-  activationTimer = setInterval(() => void pollAiExtensionActivation(), 2000);
-  copilotLogTimer = setInterval(() => void pollCopilotLogs(), 3000);
-  commitPollTimer = setInterval(() => void pollWorkspaceCommits(), 12000);
+  // Start background polling timers for monitoring AI events
+  activationTimer = setInterval(() => void pollAiExtensionActivation(), 2000); // Poll AI extension state every 2s
+  copilotLogTimer = setInterval(() => void pollCopilotLogs(), 3000); // Poll Copilot logs every 3s
+  commitPollTimer = setInterval(() => void pollWorkspaceCommits(), 12000); // Poll commits every 12s
+  // Cleanup timers on deactivation
   context.subscriptions.push({
     dispose() {
       if (activationTimer) clearInterval(activationTimer);
@@ -249,13 +266,19 @@ function activate(context) {
   void pollWorkspaceCommits(true);
 }
 
+// === Extension Deactivation ===
+// Cleanup when extension is unloaded
 function deactivate() {
+  // Stop all polling timers to free resources
   if (activationTimer) clearInterval(activationTimer);
   if (copilotLogTimer) clearInterval(copilotLogTimer);
   if (commitPollTimer) clearInterval(commitPollTimer);
 }
 
+// === Command Registration ===
+// Register VS Code commands accessible via command palette
 function registerCommands(context) {
+  // Show output channel command
   context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.showOutput", () => outputChannel.show(true)));
   context.subscriptions.push(vscode.commands.registerCommand("lcn.showLog", () => outputChannel.show(true)));
   context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.inspectAiExtensions", () => {
@@ -327,34 +350,49 @@ function registerCommands(context) {
   }));
 }
 
+// === Event Listener Registration ===
+// Hook into VS Code events to track Copilot usage and file changes
 function registerListeners(context, sidebar) {
   const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
+  // Track when Copilot commands are executed
   if (typeof onWillExecuteCommand === "function") {
     context.subscriptions.push(onWillExecuteCommand((event) => {
       const toolName = COPILOT_COMMANDS[event?.command];
       if (!toolName) return;
-      pendingTool = toolName;
+      pendingTool = toolName; // Update current tool
       pendingToolTime = Date.now();
       appendJsonLine({ label: "copilot-command", provider: "copilot", command: event.command, tool: toolName });
       log(`copilot-command: ${event.command} -> ${toolName}`);
       outputChannel.show(true);
     }));
   }
+  // Track text changes (detect suggestions/completions)
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => void handleDocumentChange(event)));
+  // Track saved documents (detect significant code changes)
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => void handleNarratorSave(doc, sidebar)));
 }
 
+// === Helper Function ===
+// Check if document should be ignored (virtual files, debug output, logs)
+function shouldIgnoreDocument(document) {
+  const scheme = String(document?.uri?.scheme || ""); // Check URI scheme
+  const fileName = String(document?.fileName || "");  // Check file name
+  // Ignore VS Code virtual documents and log files
+  return scheme === "output" || scheme === "extension-output" || fileName.endsWith(".log");\n}
+
+// === Document Change Handler ===
+// Monitor text insertion to detect Copilot suggestions and user pastes
 async function handleDocumentChange(event) {
   if (!event?.contentChanges?.length || shouldIgnoreDocument(event.document)) return;
   const change = event.contentChanges[0];
   const insertedText = String(change.text || "");
-  if (!insertedText.trim()) return;
+  if (!insertedText.trim()) return; // Skip whitespace-only changes
 
   const now = Date.now();
   const documentPath = event.document?.uri?.fsPath || event.document?.uri?.toString() || "unknown";
   const promptPreview = buildPreview(insertedText);
   const looksTyped = insertedText.length === 1 && !insertedText.includes("\n");
-  if (looksTyped) return;
+  if (looksTyped) return; // Skip individual character typing
 
   const clipboardText = await readClipboardSafe();
   const isPaste = detectPaste(insertedText, clipboardText);
@@ -389,23 +427,29 @@ async function handleDocumentChange(event) {
   );
 }
 
+// === Narrator Save Handler ===
+// Generate code diffs and send to narrator backend for documentation generation
 async function handleNarratorSave(doc, sidebar) {
-  if (doc.isUntitled || doc.uri.scheme !== "file") return;
+  if (doc.isUntitled || doc.uri.scheme !== "file") return; // Only track real files
   const cfg = getNarratorConfig();
   const fsPath = doc.uri.fsPath;
-  if (isIgnoredByNarrator(fsPath, cfg.ignoreGlobs)) return;
+  if (isIgnoredByNarrator(fsPath, cfg.ignoreGlobs)) return; // Skip ignored paths
 
+  // Compare current state with last snapshot
   const previous = narratorSnapshots.get(fsPath)?.text ?? "";
   const next = doc.getText();
-  narratorSnapshots.set(fsPath, { text: next, version: doc.version });
+  narratorSnapshots.set(fsPath, { text: next, version: doc.version }); // Update snapshot
 
+  // Generate unified diff and count changes
   const diff = createUnifiedDiff(fsPath, previous, next);
   const changedLines = countChangedLines(diff);
-  if (changedLines < cfg.minChangedLines) return;
+  if (changedLines < cfg.minChangedLines) return; // Skip minimal changes
 
+  // Debounce if previous delta still pending (user still editing)
   const existing = narratorPending.get(fsPath);
   if (existing) clearTimeout(existing.timer);
 
+  // Delay sending delta to batch rapid edits (debouncing)
   const timer = setTimeout(async () => {
     narratorPending.delete(fsPath);
     const payload = {
@@ -434,14 +478,16 @@ async function handleNarratorSave(doc, sidebar) {
   narratorPending.set(fsPath, { timer });
 }
 
+// === AI Extension Polling ===
+// Monitor configured AI extensions for activation/deactivation events
 async function pollAiExtensionActivation(initial = false) {
   const now = Date.now();
   for (const extensionId of getWatchedExtensions()) {
     const extension = vscode.extensions.getExtension(extensionId);
     const isActive = Boolean(extension?.isActive);
     const previous = extensionStates.get(extensionId);
-    extensionStates.set(extensionId, isActive);
-    if (initial || !extension || !isActive || previous === isActive) continue;
+    extensionStates.set(extensionId, isActive); // Track state change
+    if (initial || !extension || !isActive || previous === isActive) continue; // Only on state change
     const recentPrompt = getRecentPromptContext(now);
     await emitCommitEvent("ai-activated", {
       appName: "vscode",
@@ -458,23 +504,26 @@ async function pollAiExtensionActivation(initial = false) {
   }
 }
 
+// === Repository Commit Polling ===
+// Monitor git repositories for new commits and analyze their AI contribution
 async function pollWorkspaceCommits(initial = false) {
   const folders = vscode.workspace.workspaceFolders || [];
   for (const folder of folders) {
     const repoRoot = folder.uri.fsPath;
     let headSha = "";
     try {
-      headSha = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim();
+      headSha = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim(); // Get current HEAD commit
     } catch {
-      continue;
+      continue; // Invalid git repo, skip
     }
 
     const previousHead = repoHeads.get(repoRoot);
     repoHeads.set(repoRoot, headSha);
     if (initial || !previousHead || previousHead === headSha) {
-      continue;
+      continue; // No new commits
     }
 
+    // New commit detected, generate receipt
     try {
       await publishReceiptForRepo(repoRoot);
     } catch (error) {
@@ -483,6 +532,8 @@ async function pollWorkspaceCommits(initial = false) {
   }
 }
 
+// === Receipt Generation ===
+// Generate AI contribution analysis receipt for a commit
 async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
   const commitHash = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim();
   if (!commitHash) {
@@ -541,6 +592,8 @@ async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
   return body;
 }
 
+// === Receipt Preview ===
+// Generate preview of AI contribution for staged/working changes
 async function previewReceiptForRepo(repoRoot) {
   const stagedDiff = await runGit(["diff", "--cached", "--unified=0"], repoRoot).catch(() => "");
   const workingDiff = await runGit(["diff", "--unified=0"], repoRoot).catch(() => "");
@@ -604,10 +657,12 @@ async function previewReceiptForRepo(repoRoot) {
   return body;
 }
 
+// === Event Emission ===
+// Log events locally and send to remote backend for tracking
 async function emitCommitEvent(label, payload) {
-  appendJsonLine({ label, source: payload.eventType || label, ...payload });
+  appendJsonLine({ label, source: payload.eventType || label, ...payload }); // Log to local file
   const backendUrl = getCommitConfig("backendUrl");
-  if (!backendUrl) return;
+  if (!backendUrl) return; // Skip remote if not configured
   try {
     await fetch(backendUrl, {
       method: "POST",
@@ -619,20 +674,24 @@ async function emitCommitEvent(label, payload) {
   }
 }
 
+// === Copilot Log Polling ===
+// Monitor VS Code's Copilot log file for model queries and tool hints
 async function pollCopilotLogs(initial = false) {
   const latestLog = findLatestCopilotLog();
   if (!latestLog) {
     if (initial) log("No Copilot log file found.");
-    return;
+    return; // No log file available
   }
+  // Detect when log file is rotated, reset tracking
   if (watchedCopilotLogPath !== latestLog.fullPath) {
-    watchedCopilotLogPath = latestLog.fullPath;
-    watchedCopilotLogSize = 0;
-    seenCopilotLogLines.clear();
+    watchedCopilotLogPath = latestLog.fullPath; // Switch to new log file
+    watchedCopilotLogSize = 0; // Start from beginning
+    seenCopilotLogLines.clear(); // Clear dedup cache
   }
+  // Read only new lines appended since last read
   const chunk = readNewLogChunk(watchedCopilotLogPath, watchedCopilotLogSize);
-  if (!chunk) return;
-  watchedCopilotLogSize = chunk.nextOffset;
+  if (!chunk) return; // No new data
+  watchedCopilotLogSize = chunk.nextOffset; // Update read position
   for (const line of chunk.lines) {
     const normalizedLine = String(line || "").trim();
     const model = extractModelHint(normalizedLine);
@@ -650,122 +709,144 @@ async function pollCopilotLogs(initial = false) {
   }
 }
 
+// === Utility Functions ===
+
+// Get list of AI extensions to monitor from configuration
 function getWatchedExtensions() {
   const configured = getCommitConfig("aiExtensions");
-  return Array.isArray(configured) ? configured : [];
+  return Array.isArray(configured) ? configured : []; // Default to empty if not configured
 }
 
+// Check if user input is recent enough to be in prompt context window
 function getRecentPromptContext(now) {
   if (!lastPromptContext) return null;
   return now - lastPromptContext.createdAt <= Number(getCommitConfig("promptWindowMs") || 60000)
     ? lastPromptContext
-    : null;
+    : null; // Beyond window, discard
 }
 
+// Get file path of currently active editor
 function getActiveDocumentPath() {
   return vscode.window.activeTextEditor?.document?.uri?.fsPath || "unknown";
 }
 
+// === Tool Detection ===
+// Determine which AI tool or human interaction is currently active
 function currentTool() {
-  if (pendingTool && Date.now() - pendingToolTime < TOOL_WINDOW_MS) return pendingTool;
-  if (Date.now() - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) return "Copilot (log activity)";
-  return "Human / Unknown";
+  if (pendingTool && Date.now() - pendingToolTime < TOOL_WINDOW_MS) return pendingTool; // Recent command
+  if (Date.now() - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) return "Copilot (log activity)"; // Recent log
+  return "Human / Unknown"; // Fallback
 }
 
+// Classify how text was inserted: typed manually, pasted, or AI suggestion
 function classifyInsertionSource(now, isPaste, insertedText) {
-  if (isPaste) return "paste-event";
+  if (isPaste) return "paste-event"; // Explicit paste from clipboard
+  // Multi-line or long text during AI activity suggests suggestion
   if ((currentTool() !== "Human / Unknown" || now - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) && insertedText.length > 20) {
     return "inline-suggestion";
   }
-  return "typed";
+  return "typed"; // Single character typing
 }
 
+// Detect if inserted text exactly matches clipboard content (paste detection)
 function detectPaste(insertedText, clipboardText) {
   const minLength = Number(getCommitConfig("pasteMinLength") || 12);
+  // Normalize whitespace and compare
   return normalizeWhitespace(insertedText).length >= minLength && normalizeWhitespace(insertedText) === normalizeWhitespace(clipboardText);
 }
 
+// Map extension ID to AI provider name
 function detectProviderFromExtensionId(extensionId) {
   const value = String(extensionId || "").toLowerCase();
   if (value.includes("copilot")) return "copilot";
   if (value.includes("codex")) return "codex";
   if (value.includes("openai") || value.includes("chatgpt")) return "openai";
-  return "unknown";
+  return "unknown"; // Unrecognized provider
 }
 
-function shouldIgnoreDocument(document) {
-  const scheme = String(document?.uri?.scheme || "");
-  const fileName = String(document?.fileName || "");
-  return scheme === "output" || scheme === "extension-output" || fileName.endsWith(".log");
-}
+// === Configuration ===
 
+// Fetch configuration value from commitConfessional extension settings
 function getCommitConfig(key) {
   return vscode.workspace.getConfiguration("commitConfessional").get(key);
 }
 
+// Fetch narrator (LCN) configuration with defaults
 function getNarratorConfig() {
   const cfg = vscode.workspace.getConfiguration("lcn");
   return {
-    backendUrl: cfg.get("backendUrl", "http://localhost:8787"),
-    debounceMs: cfg.get("debounceMs", 5000),
-    minChangedLines: cfg.get("minChangedLines", 1),
-    ignoreGlobs: cfg.get("ignoreGlobs", ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.git/**", "**/*.map", "**/*lock*.json"]),
+    backendUrl: cfg.get("backendUrl", "http://localhost:8787"), // LCN backend endpoint
+    debounceMs: cfg.get("debounceMs", 5000), // Debounce time for code changes
+    minChangedLines: cfg.get("minChangedLines", 1), // Minimum changed lines to trigger narrator
+    ignoreGlobs: cfg.get("ignoreGlobs", ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.git/**", "**/*.map", "**/*lock*.json"]), // Patterns to ignore
   };
 }
 
+// Check if file path should be ignored by narrator
 function isIgnoredByNarrator(filePath, globs) {
   const normalized = String(filePath || "").replace(/\\/g, "/");
-  return globs.some((glob) => globToRegExp(glob).test(normalized));
+  return globs.some((glob) => globToRegExp(glob).test(normalized)); // Test against all ignore patterns
 }
 
+// Convert glob pattern to RegExp for matching
 function globToRegExp(glob) {
-  let pattern = String(glob || "").replace(/\\/g, "/").replace(/[|{}()[\]^$+?.]/g, "\\$&");
-  pattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*");
+  let pattern = String(glob || "").replace(/\\/g, "/").replace(/[|{}()[\]^$+?.]/g, "\\$&"); // Escape regex chars
+  pattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*"); // Convert glob wildcards
   return new RegExp(`^${pattern}$`, "i");
 }
 
+// === Diff Generation ===
+// Create unified diff format from before/after file contents
 function createUnifiedDiff(filePath, beforeText, afterText) {
   const before = splitLines(beforeText);
   const after = splitLines(afterText);
   const max = Math.max(before.length, after.length);
+  // Build unified diff with headers
   const lines = [`--- ${filePath}`, `+++ ${filePath}`, `@@ -1,${before.length} +1,${after.length} @@`];
+  // Compare line by line
   for (let i = 0; i < max; i += 1) {
     if (before[i] === after[i]) {
-      if (before[i] !== undefined) lines.push(` ${before[i]}`);
+      if (before[i] !== undefined) lines.push(` ${before[i]}`); // Context line
       continue;
     }
-    if (before[i] !== undefined) lines.push(`-${before[i]}`);
-    if (after[i] !== undefined) lines.push(`+${after[i]}`);
+    if (before[i] !== undefined) lines.push(`-${before[i]}`); // Removed line
+    if (after[i] !== undefined) lines.push(`+${after[i]}`); // Added line
   }
   return lines.join("\n");
 }
 
+// Count changed (added + removed) lines in a diff
 function countChangedLines(diff) {
-  return (diff.match(/^\+[^+]/gm) || []).length + (diff.match(/^-[^-]/gm) || []).length;
+  return (diff.match(/^\+[^+]/gm) || []).length + (diff.match(/^-[^-]/gm) || []).length; // Lines starting with +/- (not +++/---)
 }
 
+// Split text into lines, handling different line ending formats
 function splitLines(value) {
   return value ? String(value).replace(/\r/g, "").split("\n") : [];
 }
 
+// === Log File Discovery ===
+// Find the most recent VS Code Copilot log file
 function findLatestCopilotLog() {
-  const appData = process.env.APPDATA;
-  if (!appData) return null;
-  const logsRoot = path.join(appData, "Code", "logs");
-  if (!fs.existsSync(logsRoot)) return null;
+  const appData = process.env.APPDATA; // Windows APPDATA folder
+  if (!appData) return null; // No APPDATA on non-Windows or missing
+  const logsRoot = path.join(appData, "Code", "logs"); // VS Code logs directory
+  if (!fs.existsSync(logsRoot)) return null; // Log directory doesn't exist
+  // Find Copilot logs, sort by modification time (newest first)
   return walkLogFiles(logsRoot).filter((file) => /copilot/i.test(file.fullPath)).sort((a, b) => b.mtimeMs - a.mtimeMs)[0] || null;
 }
 
+// Recursively walk directory tree to find all .log files
 function walkLogFiles(root) {
-  const results = [];
-  const stack = [root];
+  const results = []; // Accumulate results
+  const stack = [root]; // DFS stack for directory traversal
   while (stack.length) {
     const current = stack.pop();
     let entries = [];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; } // Skip unreadable dirs
     for (const entry of entries) {
       const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) stack.push(fullPath);
+      if (entry.isDirectory()) stack.push(fullPath); // Recurse into subdirectories
       if (entry.isFile() && entry.name.toLowerCase().endsWith(".log")) {
         try {
           const stats = fs.statSync(fullPath);
@@ -777,78 +858,99 @@ function walkLogFiles(root) {
   return results;
 }
 
+// Read new lines appended to a log file since last read (at offset)
 function readNewLogChunk(filePath, offset) {
   let stats;
-  try { stats = fs.statSync(filePath); } catch { return null; }
-  const start = stats.size < offset ? 0 : offset;
-  if (stats.size === start) return null;
+  try { stats = fs.statSync(filePath); } catch { return null; } // File may have been deleted
+  const start = stats.size < offset ? 0 : offset; // Handle log rotation (file shrinking)
+  if (stats.size === start) return null; // No new data
+  // Read from last offset to end of file
   const buffer = Buffer.alloc(stats.size - start);
   const fd = fs.openSync(filePath, "r");
   try { fs.readSync(fd, buffer, 0, buffer.length, start); } finally { fs.closeSync(fd); }
-  return { nextOffset: stats.size, lines: buffer.toString("utf8").split(/\r?\n/) };
+  return { nextOffset: stats.size, lines: buffer.toString("utf8").split(/\r?\n/) }; // Split into lines
 }
 
+// === Log Analysis ===
+// Extract AI model names from Copilot log entries
 function extractModelHint(line) {
+  // Match common AI model names: Claude, GPT, Gemini, O1/O3, etc.
   for (const pattern of [/claude[- ]?[a-z0-9.]*/i, /gpt[- ]?[0-9a-z.]*/i, /gemini[- ]?[0-9a-z.]*/i, /o[0-9][ -]?[a-z0-9]*/i]) {
     const match = String(line || "").match(pattern);
     if (match) return match[0];
   }
-  return null;
+  return null; // No model found in line
 }
 
+// Infer which Copilot feature is being used from log patterns
 function inferToolFromCopilotLogLine(line) {
   const value = String(line || "").toLowerCase();
+  // Match log patterns to specific Copilot features
   if (value.includes("[panel/editagent]")) return "Copilot Chat Edit";
   if (value.includes("[copilotlanguagemodelwrapper]")) return "Copilot Inline Suggestion";
   if (value.includes("[title]") || value.includes("[progressmessages]")) return "Copilot Chat";
-  return null;
+  return null; // Unrecognized pattern
 }
 
+// Append timestamped JSON line to local event log file
 function appendJsonLine(payload) {
   try { fs.appendFileSync(LOG_PATH, `${JSON.stringify({ ts: new Date().toISOString(), ...payload })}\n`, "utf8"); } catch {}
 }
 
+// === Text Processing ===
+
+// Normalize whitespace by collapsing multiple spaces/tabs and trimming
 function normalizeWhitespace(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+// Create preview string (truncate to 180 chars if needed)
 function buildPreview(value) {
   const text = normalizeWhitespace(value);
-  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text; // Truncate with ellipsis
 }
 
+// Extract added line samples from diff output
 function extractAddedLineSamples(diffText, limit = 2) {
   return String(diffText || "")
     .split(/\r?\n/)
-    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
-    .map((line) => normalizeWhitespace(line.slice(1)))
-    .filter(Boolean)
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++")) // Added lines (not header)
+    .map((line) => normalizeWhitespace(line.slice(1))) // Remove leading +
+    .filter(Boolean) // Skip empty lines
     .slice(0, Math.max(0, limit));
 }
 
+// Compute SHA256 hash of normalized text
 function hashContent(value) {
   const normalized = normalizeWhitespace(value);
   return normalized ? `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}` : null;
 }
 
+// === I/O and Logging ===
+
+// Safely read clipboard content, return empty string if access denied
 async function readClipboardSafe() {
   try { return await vscode.env.clipboard.readText(); } catch { return ""; }
 }
 
+// Log message with timestamp to VS Code output channel
 function log(message) {
   outputChannel?.appendLine(`[${new Date().toISOString()}] ${message}`);
 }
 
+// Remove trailing slash from URL for consistent formatting
 function trimSlash(value) {
   return String(value || "").replace(/\/$/, "");
 }
 
+// Fetch and parse JSON from URL with error handling
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json();
 }
 
+// Execute git command and return stdout
 function runGit(args, cwd) {
   return new Promise((resolve, reject) => {
     execFile("git", args, { cwd, encoding: "utf8" }, (error, stdout) => {

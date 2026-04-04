@@ -18,3 +18,4 @@ This merged VS Code extension combines both previous editor integrations:
 
 - `commitConfessional.*` controls background capture behavior
 - `lcn.*` controls narrator backend, debounce, and ignored paths
+
